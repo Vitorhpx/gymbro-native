@@ -1,4 +1,4 @@
-package com.vitorperles.gymbro.domain
+package com.gymbro.local.domain
 
 import kotlin.math.max
 import kotlin.math.roundToInt

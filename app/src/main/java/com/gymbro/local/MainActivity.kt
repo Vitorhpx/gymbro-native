@@ -1,4 +1,4 @@
-package com.vitorperles.gymbro
+package com.gymbro.local
 
 import android.os.Bundle
 import androidx.activity.ComponentActivity
@@ -47,17 +47,17 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
-import com.vitorperles.gymbro.data.FoodEntryEntity
-import com.vitorperles.gymbro.data.SetCompletionEntity
-import com.vitorperles.gymbro.data.WeightEntryEntity
-import com.vitorperles.gymbro.data.WorkoutSessionEntity
-import com.vitorperles.gymbro.data.displayCalories
-import com.vitorperles.gymbro.data.displayProteinGrams
-import com.vitorperles.gymbro.data.totalCalories
-import com.vitorperles.gymbro.data.totalProteinGrams
-import com.vitorperles.gymbro.domain.SeedData
-import com.vitorperles.gymbro.domain.WorkoutDay
-import com.vitorperles.gymbro.domain.WorkoutRecommendation
+import com.gymbro.local.data.FoodEntryEntity
+import com.gymbro.local.data.SetCompletionEntity
+import com.gymbro.local.data.WeightEntryEntity
+import com.gymbro.local.data.WorkoutSessionEntity
+import com.gymbro.local.data.displayCalories
+import com.gymbro.local.data.displayProteinGrams
+import com.gymbro.local.data.totalCalories
+import com.gymbro.local.data.totalProteinGrams
+import com.gymbro.local.domain.SeedData
+import com.gymbro.local.domain.WorkoutDay
+import com.gymbro.local.domain.WorkoutRecommendation
 import java.time.DayOfWeek
 import java.time.Instant
 import java.time.LocalDate
@@ -161,7 +161,7 @@ private fun displayDate(epoch: Long): String = Instant.ofEpochMilli(epoch).atZon
     }
     Section(if (active != null) "Workout in progress" else "Recommended workout") {
         Text(active?.dayName ?: recommended.name, style = MaterialTheme.typography.titleMedium)
-        Text("Vitor PPL 45 V2 · about 45 min")
+        Text("GymBro PPL 45 V2 · about 45 min")
         if (active == null) Button(onClick = { vm.startWorkout(recommended.id, recommended.name) }) { Text("Start ${recommended.name}") }
         else Text("Open Train to resume your saved session.")
     }
@@ -169,7 +169,7 @@ private fun displayDate(epoch: Long): String = Instant.ofEpochMilli(epoch).atZon
 
 @Composable private fun TrainScreen(active: WorkoutSessionEntity?, completions: List<SetCompletionEntity>, vm: MainViewModel) = Screen("Train") {
     if (active == null) {
-        Text("Vitor PPL 45 V2", style = MaterialTheme.typography.titleLarge)
+        Text("GymBro PPL 45 V2", style = MaterialTheme.typography.titleLarge)
         Text("3×/week · ~45 min · focused sessions")
         SeedData.plan.days.forEach { day ->
             Section(day.name) {

@@ -1,6 +1,6 @@
-package com.vitorperles.gymbro.data
+package com.gymbro.local.data
 
-import com.vitorperles.gymbro.domain.SeedData
+import com.gymbro.local.domain.SeedData
 import org.junit.Assert.assertEquals
 import org.junit.Test
 

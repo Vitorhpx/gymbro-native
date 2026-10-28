@@ -7,11 +7,11 @@ plugins {
 }
 
 android {
-    namespace = "com.vitorperles.gymbro"
+    namespace = "com.gymbro.local"
     compileSdk = 36
 
     defaultConfig {
-        applicationId = "com.vitorperles.gymbro"
+        applicationId = "com.gymbro.local"
         minSdk = 26
         targetSdk = 36
         versionCode = 1

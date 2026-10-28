@@ -1,4 +1,4 @@
-package com.vitorperles.gymbro.domain
+package com.gymbro.local.domain
 
 object WorkoutRecommendation {
     fun nextDay(completedDayIds: List<String>): WorkoutDay {

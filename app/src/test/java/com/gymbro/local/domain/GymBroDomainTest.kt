@@ -1,4 +1,4 @@
-package com.vitorperles.gymbro.domain
+package com.gymbro.local.domain
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
@@ -9,7 +9,8 @@ class GymBroDomainTest {
     fun seededPlanHasStablePplPrescriptionAndGluteFocusedLegs() {
         val plan = SeedData.plan
 
-        assertEquals("vitor-ppl-45-v2", plan.id)
+        assertEquals("gymbro-ppl-45-v2", plan.id)
+        assertEquals("GymBro PPL 45 V2", plan.name)
         assertEquals(listOf("Push", "Pull", "Legs"), plan.days.map { it.name })
         assertEquals(15, plan.days.sumOf { it.exercises.size })
         val legs = plan.days.single { it.name == "Legs" }

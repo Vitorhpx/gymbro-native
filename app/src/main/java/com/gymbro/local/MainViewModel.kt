@@ -1,15 +1,15 @@
-package com.vitorperles.gymbro
+package com.gymbro.local
 
 import android.app.Application
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
-import com.vitorperles.gymbro.data.FoodEntryEntity
-import com.vitorperles.gymbro.data.GymBroDatabase
-import com.vitorperles.gymbro.data.SetCompletionEntity
-import com.vitorperles.gymbro.data.SettingsEntity
-import com.vitorperles.gymbro.data.WeightEntryEntity
-import com.vitorperles.gymbro.data.WorkoutSessionEntity
-import com.vitorperles.gymbro.domain.FoodPreset
+import com.gymbro.local.data.FoodEntryEntity
+import com.gymbro.local.data.GymBroDatabase
+import com.gymbro.local.data.SetCompletionEntity
+import com.gymbro.local.data.SettingsEntity
+import com.gymbro.local.data.WeightEntryEntity
+import com.gymbro.local.data.WorkoutSessionEntity
+import com.gymbro.local.domain.FoodPreset
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch

@@ -1,4 +1,4 @@
-package com.vitorperles.gymbro.data
+package com.gymbro.local.data
 
 import android.content.Context
 import androidx.room.Dao
@@ -12,7 +12,7 @@ import androidx.room.Query
 import androidx.room.Room
 import androidx.room.RoomDatabase
 import androidx.room.Transaction
-import com.vitorperles.gymbro.domain.FoodPreset
+import com.gymbro.local.domain.FoodPreset
 import kotlinx.coroutines.flow.Flow
 import kotlin.math.roundToLong
 

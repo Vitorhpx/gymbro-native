@@ -1,4 +1,4 @@
-package com.vitorperles.gymbro.domain
+package com.gymbro.local.domain
 
 data class ExercisePrescription(
     val id: String,
@@ -24,8 +24,8 @@ object SeedData {
     )
 
     val plan = WorkoutPlan(
-        id = "vitor-ppl-45-v2",
-        name = "Vitor PPL 45 V2",
+        id = "gymbro-ppl-45-v2",
+        name = "GymBro PPL 45 V2",
         days = listOf(
             WorkoutDay("push", "Push", listOf(
                 ex("chest-press", "Chest Press Machine", 3, "6–10", 120),
