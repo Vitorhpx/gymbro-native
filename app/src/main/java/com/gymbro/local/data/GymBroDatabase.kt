@@ -13,6 +13,7 @@ import androidx.room.Room
 import androidx.room.RoomDatabase
 import androidx.room.Transaction
 import com.gymbro.local.domain.FoodPreset
+import com.gymbro.local.network.UsdaFood
 import kotlinx.coroutines.flow.Flow
 import kotlin.math.roundToLong
 
@@ -42,6 +43,14 @@ data class FoodEntryEntity(
         fun from(food: FoodPreset, grams: Int, loggedAt: Long) = FoodEntryEntity(
             foodId = food.id,
             name = food.name,
+            grams = grams,
+            calorieMilliUnits = (food.caloriesPer100g * grams * 10).roundToLong(),
+            proteinMilligrams = (food.proteinPer100g * grams * 10).roundToLong(),
+            loggedAt = loggedAt,
+        )
+        fun from(food: UsdaFood, grams: Int, loggedAt: Long) = FoodEntryEntity(
+            foodId = "usda-${food.fdcId}",
+            name = food.description,
             grams = grams,
             calorieMilliUnits = (food.caloriesPer100g * grams * 10).roundToLong(),
             proteinMilligrams = (food.proteinPer100g * grams * 10).roundToLong(),
