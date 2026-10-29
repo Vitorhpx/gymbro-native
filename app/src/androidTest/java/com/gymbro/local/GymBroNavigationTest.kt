@@ -1,10 +1,14 @@
 package com.gymbro.local
 
 import androidx.compose.ui.test.assertIsDisplayed
+import androidx.compose.ui.test.fetchSemanticsNode
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
+import androidx.core.view.ViewCompat
+import androidx.core.view.WindowInsetsCompat
+import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
 
@@ -22,5 +26,17 @@ class GymBroNavigationTest {
         compose.onNodeWithContentDescription("Settings").performClick()
         compose.onNodeWithText("Settings & updates").assertIsDisplayed()
         compose.onNodeWithText("Check for update").assertIsDisplayed()
+    }
+
+    @Test fun pageHeaderClearsTheSystemStatusBar() {
+        val statusBarHeight = ViewCompat.getRootWindowInsets(compose.activity.window.decorView)
+            ?.getInsets(WindowInsetsCompat.Type.statusBars())
+            ?.top ?: 0
+        val headerTop = compose.onNodeWithText("YOUR DAILY BRIEF")
+            .fetchSemanticsNode()
+            .boundsInRoot
+            .top
+
+        assertTrue("Header must start below the status bar", headerTop >= statusBarHeight)
     }
 }
