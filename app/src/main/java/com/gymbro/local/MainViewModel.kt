@@ -2,6 +2,7 @@ package com.gymbro.local
 
 import android.app.Application
 import android.content.Context
+import android.net.Uri
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.gymbro.local.data.CustomFoodEntity
@@ -9,6 +10,8 @@ import com.gymbro.local.data.ExerciseCompletionEntity
 import com.gymbro.local.data.FoodEntryEntity
 import com.gymbro.local.data.GymBroDatabase
 import com.gymbro.local.data.MealSlot
+import com.gymbro.local.data.PortableBackupRepository
+import com.gymbro.local.data.decodeStrictUtf8
 import com.gymbro.local.data.SavedMealEntity
 import com.gymbro.local.data.SavedMealItemEntity
 import com.gymbro.local.data.SavedMealWithItems
@@ -62,6 +65,13 @@ sealed interface UpdateUiState {
     data class Error(val message: String) : UpdateUiState
 }
 
+sealed interface BackupUiState {
+    data object Idle : BackupUiState
+    data object Working : BackupUiState
+    data class Success(val message: String) : BackupUiState
+    data class Error(val message: String) : BackupUiState
+}
+
 object UpdateUiCopy {
     fun downloadButton(release: AppRelease): String = if (release.apk?.sha256 == null) "Download source-validated APK" else "Download APK"
     fun downloadedMessage(downloaded: UpdateUiState.Downloaded): String = when (downloaded.integrity) {
@@ -78,7 +88,9 @@ class MainViewModel(
 ) : AndroidViewModel(application) {
     constructor(application: Application) : this(application, HttpUsdaFoodSearchService(), GitHubAppUpdateService(), HttpOpenFoodFactsResolver())
 
-    private val dao = GymBroDatabase.get(application).dao()
+    private val database = GymBroDatabase.get(application)
+    private val dao = database.dao()
+    private val backupRepository = PortableBackupRepository(database)
     private val preferences = application.getSharedPreferences(PRIVATE_SETTINGS, Context.MODE_PRIVATE)
     val active = dao.activeSession().stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), null)
     val sessions = dao.sessions().stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
@@ -98,6 +110,8 @@ class MainViewModel(
     val barcode = _barcode.asStateFlow()
     private val _update = MutableStateFlow<UpdateUiState>(UpdateUiState.Idle)
     val update = _update.asStateFlow()
+    private val _backup = MutableStateFlow<BackupUiState>(BackupUiState.Idle)
+    val backup = _backup.asStateFlow()
     private val _hasPersonalUsdaKey = MutableStateFlow(preferences.contains(USDA_KEY))
     val hasPersonalUsdaKey = _hasPersonalUsdaKey.asStateFlow()
 
@@ -177,6 +191,45 @@ class MainViewModel(
         } catch (e: Exception) { UpdateUiState.Error(e.message ?: "APK download failed.") }
     }
 
+    fun exportBackup(uri: Uri) = viewModelScope.launch {
+        _backup.value = BackupUiState.Working
+        _backup.value = try {
+            val (json, counts) = backupRepository.exportJson()
+            withContext(Dispatchers.IO) {
+                getApplication<Application>().contentResolver.openOutputStream(uri, "wt")?.bufferedWriter()?.use { it.write(json) }
+                    ?: error("Could not open the selected document.")
+            }
+            BackupUiState.Success("Backup exported: ${counts.total} records across all 9 data domains.")
+        } catch (e: Exception) {
+            BackupUiState.Error(e.message ?: "Backup export failed.")
+        }
+    }
+
+    fun importBackup(uri: Uri) = viewModelScope.launch {
+        _backup.value = BackupUiState.Working
+        _backup.value = try {
+            val json = withContext(Dispatchers.IO) {
+                getApplication<Application>().contentResolver.openInputStream(uri)?.use { input ->
+                    val output = java.io.ByteArrayOutputStream()
+                    val buffer = ByteArray(8_192)
+                    var total = 0
+                    while (true) {
+                        val read = input.read(buffer)
+                        if (read < 0) break
+                        total += read
+                        require(total <= MAX_BACKUP_BYTES) { "Backup exceeds the 20 MB size limit." }
+                        output.write(buffer, 0, read)
+                    }
+                    decodeStrictUtf8(output.toByteArray())
+                } ?: error("Could not open the selected document.")
+            }
+            val counts = backupRepository.importJson(json)
+            BackupUiState.Success("Backup restored and verified: ${counts.total} records across all 9 data domains.")
+        } catch (e: Exception) {
+            BackupUiState.Error("Import failed: ${e.message ?: "invalid backup"} Existing data was not changed.")
+        }
+    }
+
     fun deleteFood(id: Long) = viewModelScope.launch { dao.deleteFood(id) }
     fun logWeight(kg: Double) = viewModelScope.launch { if (kg in 25.0..400.0) dao.insertWeight(WeightEntryEntity(kilograms = kg, loggedAt = System.currentTimeMillis())) }
     fun saveGoals(calories: Int, protein: Int) = viewModelScope.launch { if (calories in 800..6000 && protein in 20..400) dao.saveSettings(SettingsEntity(calorieGoal = calories, proteinGoal = protein)) }
@@ -185,5 +238,6 @@ class MainViewModel(
         private const val PRIVATE_SETTINGS = "private_settings"
         private const val USDA_KEY = "usda_api_key"
         const val DEMO_KEY = "DEMO_KEY"
+        private const val MAX_BACKUP_BYTES = 20 * 1024 * 1024
     }
 }

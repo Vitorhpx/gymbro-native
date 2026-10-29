@@ -1,6 +1,7 @@
 package com.gymbro.local.data
 
 import android.content.Context
+import androidx.room.ColumnInfo
 import androidx.room.Dao
 import androidx.room.Database
 import androidx.room.Embedded
@@ -21,9 +22,11 @@ import androidx.sqlite.db.SupportSQLiteDatabase
 import com.gymbro.local.domain.FoodPreset
 import com.gymbro.local.network.UsdaFood
 import kotlinx.coroutines.flow.Flow
+import kotlinx.serialization.Serializable
 import kotlin.math.roundToLong
 
 @Entity(tableName = "workout_sessions", indices = [Index(value = ["completedAt"])])
+@Serializable
 data class WorkoutSessionEntity(
     @PrimaryKey(autoGenerate = true) val id: Long = 0,
     val dayId: String,
@@ -33,6 +36,7 @@ data class WorkoutSessionEntity(
 )
 
 @Entity(tableName = "set_completions", primaryKeys = ["sessionId", "exerciseId", "setIndex"])
+@Serializable
 data class SetCompletionEntity(val sessionId: Long, val exerciseId: String, val setIndex: Int)
 
 @Entity(
@@ -40,6 +44,7 @@ data class SetCompletionEntity(val sessionId: Long, val exerciseId: String, val 
     primaryKeys = ["sessionId", "exerciseId"],
     indices = [Index(value = ["exerciseId", "completedAt"])],
 )
+@Serializable
 data class ExerciseCompletionEntity(
     val sessionId: Long,
     val exerciseId: String,
@@ -55,7 +60,7 @@ fun Iterable<ExerciseCompletionEntity>.bestPrevious(
     it.exerciseId == exerciseId && it.sessionId != excludingSessionId
 }.maxWithOrNull(compareBy<ExerciseCompletionEntity> { it.weightMilliUnits }.thenBy { it.reps }.thenBy { it.completedAt })
 
-enum class MealSlot { BREAKFAST, LUNCH, DINNER, SNACK }
+@Serializable enum class MealSlot { BREAKFAST, LUNCH, DINNER, SNACK }
 
 class GymBroConverters {
     @TypeConverter fun mealSlot(value: String): MealSlot = MealSlot.valueOf(value)
@@ -63,6 +68,7 @@ class GymBroConverters {
 }
 
 @Entity(tableName = "food_entries", indices = [Index(value = ["loggedAt"])])
+@Serializable
 data class FoodEntryEntity(
     @PrimaryKey(autoGenerate = true) val id: Long = 0,
     val foodId: String,
@@ -71,6 +77,7 @@ data class FoodEntryEntity(
     val calorieMilliUnits: Long,
     val proteinMilligrams: Long,
     val loggedAt: Long,
+    @ColumnInfo(defaultValue = "'SNACK'")
     val mealSlot: MealSlot = MealSlot.SNACK,
 ) {
     companion object {
@@ -102,6 +109,7 @@ data class FoodEntryEntity(
 }
 
 @Entity(tableName = "custom_foods", indices = [Index(value = ["name"])])
+@Serializable
 data class CustomFoodEntity(
     @PrimaryKey(autoGenerate = true) val id: Long = 0,
     val name: String,
@@ -111,6 +119,7 @@ data class CustomFoodEntity(
 )
 
 @Entity(tableName = "saved_meals", indices = [Index(value = ["name"])])
+@Serializable
 data class SavedMealEntity(
     @PrimaryKey(autoGenerate = true) val id: Long = 0,
     val name: String,
@@ -118,6 +127,7 @@ data class SavedMealEntity(
 )
 
 @Entity(tableName = "saved_meal_items", primaryKeys = ["mealId", "position"], indices = [Index("mealId")])
+@Serializable
 data class SavedMealItemEntity(
     val mealId: Long,
     val position: Int,
@@ -156,6 +166,7 @@ fun FoodEntryEntity.displayProteinGrams(): String {
 }
 
 @Entity(tableName = "weight_entries", indices = [Index(value = ["loggedAt"])])
+@Serializable
 data class WeightEntryEntity(
     @PrimaryKey(autoGenerate = true) val id: Long = 0,
     val kilograms: Double,
@@ -163,6 +174,7 @@ data class WeightEntryEntity(
 )
 
 @Entity(tableName = "settings")
+@Serializable
 data class SettingsEntity(
     @PrimaryKey val id: Int = 1,
     val calorieGoal: Int = 2000,
@@ -171,6 +183,36 @@ data class SettingsEntity(
 
 @Dao
 interface GymBroDao {
+    @Query("SELECT * FROM workout_sessions ORDER BY id") suspend fun allSessionsOnce(): List<WorkoutSessionEntity>
+    @Query("SELECT * FROM set_completions ORDER BY sessionId, exerciseId, setIndex") suspend fun allSetCompletionsOnce(): List<SetCompletionEntity>
+    @Query("SELECT * FROM exercise_completions ORDER BY sessionId, exerciseId") suspend fun allExerciseCompletionsOnce(): List<ExerciseCompletionEntity>
+    @Query("SELECT * FROM food_entries ORDER BY id") suspend fun allFoodEntriesOnce(): List<FoodEntryEntity>
+    @Query("SELECT * FROM custom_foods ORDER BY id") suspend fun allCustomFoodsOnce(): List<CustomFoodEntity>
+    @Query("SELECT * FROM saved_meals ORDER BY id") suspend fun allSavedMealsOnce(): List<SavedMealEntity>
+    @Query("SELECT * FROM saved_meal_items ORDER BY mealId, position") suspend fun allSavedMealItemsOnce(): List<SavedMealItemEntity>
+    @Query("SELECT * FROM weight_entries ORDER BY id") suspend fun allWeightEntriesOnce(): List<WeightEntryEntity>
+    @Query("SELECT * FROM settings ORDER BY id") suspend fun allSettingsOnce(): List<SettingsEntity>
+
+    @Insert suspend fun restoreSessions(values: List<WorkoutSessionEntity>)
+    @Insert suspend fun restoreSetCompletions(values: List<SetCompletionEntity>)
+    @Insert suspend fun restoreExerciseCompletions(values: List<ExerciseCompletionEntity>)
+    @Insert suspend fun restoreFoodEntries(values: List<FoodEntryEntity>)
+    @Insert suspend fun restoreCustomFoods(values: List<CustomFoodEntity>)
+    @Insert suspend fun restoreSavedMeals(values: List<SavedMealEntity>)
+    @Insert suspend fun restoreSavedMealItems(values: List<SavedMealItemEntity>)
+    @Insert suspend fun restoreWeightEntries(values: List<WeightEntryEntity>)
+    @Insert suspend fun restoreSettings(values: List<SettingsEntity>)
+
+    @Query("DELETE FROM set_completions") suspend fun clearSetCompletions()
+    @Query("DELETE FROM exercise_completions") suspend fun clearExerciseCompletions()
+    @Query("DELETE FROM saved_meal_items") suspend fun clearSavedMealItems()
+    @Query("DELETE FROM workout_sessions") suspend fun clearSessions()
+    @Query("DELETE FROM food_entries") suspend fun clearFoodEntries()
+    @Query("DELETE FROM custom_foods") suspend fun clearCustomFoods()
+    @Query("DELETE FROM saved_meals") suspend fun clearSavedMeals()
+    @Query("DELETE FROM weight_entries") suspend fun clearWeightEntries()
+    @Query("DELETE FROM settings") suspend fun clearSettings()
+
     @Query("SELECT * FROM workout_sessions WHERE completedAt IS NULL ORDER BY startedAt DESC LIMIT 1")
     fun activeSession(): Flow<WorkoutSessionEntity?>
 
@@ -233,7 +275,7 @@ interface GymBroDao {
 
 @Database(
     entities = [WorkoutSessionEntity::class, SetCompletionEntity::class, ExerciseCompletionEntity::class, FoodEntryEntity::class, CustomFoodEntity::class, SavedMealEntity::class, SavedMealItemEntity::class, WeightEntryEntity::class, SettingsEntity::class],
-    version = 2,
+    version = 3,
     exportSchema = true,
 )
 @TypeConverters(GymBroConverters::class)
@@ -244,7 +286,7 @@ abstract class GymBroDatabase : RoomDatabase() {
         @Volatile private var instance: GymBroDatabase? = null
         fun get(context: Context): GymBroDatabase = instance ?: synchronized(this) {
             instance ?: Room.databaseBuilder(context.applicationContext, GymBroDatabase::class.java, "gymbro.db")
-                .addMigrations(MIGRATION_1_2)
+                .addMigrations(MIGRATION_1_2, MIGRATION_2_3)
                 .build().also { instance = it }
         }
 
@@ -261,6 +303,25 @@ abstract class GymBroDatabase : RoomDatabase() {
                 db.execSQL("CREATE INDEX IF NOT EXISTS `index_saved_meals_name` ON `saved_meals` (`name`)")
                 db.execSQL("CREATE TABLE IF NOT EXISTS `saved_meal_items` (`mealId` INTEGER NOT NULL, `position` INTEGER NOT NULL, `foodId` TEXT NOT NULL, `name` TEXT NOT NULL, `grams` INTEGER NOT NULL, `calorieMilliUnitsPer100g` INTEGER NOT NULL, `proteinMilligramsPer100g` INTEGER NOT NULL, PRIMARY KEY(`mealId`, `position`))")
                 db.execSQL("CREATE INDEX IF NOT EXISTS `index_saved_meal_items_mealId` ON `saved_meal_items` (`mealId`)")
+            }
+        }
+
+        val MIGRATION_2_3 = object : Migration(2, 3) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    """CREATE TABLE `food_entries_new` (`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, `foodId` TEXT NOT NULL, `name` TEXT NOT NULL, `grams` INTEGER NOT NULL, `calorieMilliUnits` INTEGER NOT NULL, `proteinMilligrams` INTEGER NOT NULL, `loggedAt` INTEGER NOT NULL, `mealSlot` TEXT NOT NULL DEFAULT 'SNACK')"""
+                )
+                db.execSQL(
+                    """INSERT INTO `food_entries_new` (`id`, `foodId`, `name`, `grams`, `calorieMilliUnits`, `proteinMilligrams`, `loggedAt`, `mealSlot`) SELECT `id`, `foodId`, `name`, `grams`, `calorieMilliUnits`, `proteinMilligrams`, `loggedAt`, `mealSlot` FROM `food_entries`"""
+                )
+                db.execSQL("DELETE FROM `sqlite_sequence` WHERE `name` = 'food_entries_new'")
+                db.execSQL(
+                    """INSERT INTO `sqlite_sequence` (`name`, `seq`) SELECT 'food_entries_new', MAX(COALESCE((SELECT `seq` FROM `sqlite_sequence` WHERE `name` = 'food_entries'), 0), COALESCE(MAX(`id`), 0)) FROM `food_entries_new`"""
+                )
+                db.execSQL("DROP TABLE `food_entries`")
+                db.execSQL("ALTER TABLE `food_entries_new` RENAME TO `food_entries`")
+                db.execSQL("UPDATE `sqlite_sequence` SET `name` = 'food_entries' WHERE `name` = 'food_entries_new'")
+                db.execSQL("CREATE INDEX `index_food_entries_loggedAt` ON `food_entries` (`loggedAt`)")
             }
         }
     }

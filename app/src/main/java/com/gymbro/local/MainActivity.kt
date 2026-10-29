@@ -5,6 +5,8 @@ import android.net.Uri
 import android.os.Bundle
 import android.provider.Settings
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.compose.setContent
 import androidx.activity.viewModels
 import androidx.compose.foundation.background
@@ -161,8 +163,11 @@ private enum class Tab(val label: String, val icon: ImageVector) {
     val customFoods by vm.customFoods.collectAsState(); val savedMeals by vm.savedMeals.collectAsState()
     val weights by vm.weights.collectAsState(); val settings by vm.settings.collectAsState()
     val search by vm.foodSearch.collectAsState(); val update by vm.update.collectAsState()
+    val backup by vm.backup.collectAsState()
     val barcode by vm.barcode.collectAsState()
     val hasKey by vm.hasPersonalUsdaKey.collectAsState()
+    val createBackup = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/json")) { uri -> uri?.let(vm::exportBackup) }
+    val openBackup = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri -> uri?.let(vm::importBackup) }
     val adaptiveInfo = currentWindowAdaptiveInfo()
 
     NavigationSuiteScaffold(
@@ -222,7 +227,12 @@ private enum class Tab(val label: String, val icon: ImageVector) {
             )
         }
     }
-    if (showSettings) SettingsDialog(hasKey, update, settings?.calorieGoal ?: 2000, settings?.proteinGoal ?: 160, vm, onDismiss = { showSettings = false })
+    if (showSettings) SettingsDialog(
+        hasKey, update, backup, settings?.calorieGoal ?: 2000, settings?.proteinGoal ?: 160, vm,
+        exportBackup = { createBackup.launch("gymbro-backup.json") },
+        importBackup = { openBackup.launch(arrayOf("application/json", "text/json", "text/plain")) },
+        onDismiss = { showSettings = false },
+    )
 }
 
 @Composable private fun Page(title: String, eyebrow: String, onSettings: () -> Unit, content: @Composable () -> Unit) {
@@ -399,7 +409,7 @@ private fun displayDate(epoch: Long): String = Instant.ofEpochMilli(epoch).atZon
     Surface(modifier.padding(16.dp), color = MaterialTheme.colorScheme.surface, shape = RoundedCornerShape(28.dp)) { Column(Modifier.padding(24.dp), verticalArrangement = Arrangement.spacedBy(18.dp)) { Text("AT A GLANCE", color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.Bold); Text(when (tab) { Tab.Today -> "Build momentum"; Tab.Train -> "Session guide"; Tab.Eat -> "Today’s fuel"; Tab.Progress -> "Trend line" }, style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Black); HorizontalDivider(); Text(when (tab) { Tab.Today -> active?.let { "${it.dayName} is ready to resume." } ?: "No active workout. Start the recommended session when ready."; Tab.Train -> "Each exercise completion, weight, and reps are persisted immediately, so changing window size or posture will not lose progress."; Tab.Eat -> "${foods.filter { it.loggedAt >= startOfToday() }.size} food entries logged today."; Tab.Progress -> weights.firstOrNull()?.let { "Latest weigh-in: ${it.kilograms} kg." } ?: "Log a weigh-in to begin your trend." }, color = MaterialTheme.colorScheme.onSurfaceVariant) } }
 }
 
-@Composable private fun SettingsDialog(hasKey: Boolean, update: UpdateUiState, calorieGoal: Int, proteinGoal: Int, vm: MainViewModel, onDismiss: () -> Unit) {
+@Composable private fun SettingsDialog(hasKey: Boolean, update: UpdateUiState, backup: BackupUiState, calorieGoal: Int, proteinGoal: Int, vm: MainViewModel, exportBackup: () -> Unit, importBackup: () -> Unit, onDismiss: () -> Unit) {
     var apiKey by rememberSaveable { mutableStateOf("") }; var calories by rememberSaveable(calorieGoal) { mutableStateOf(calorieGoal.toString()) }; var protein by rememberSaveable(proteinGoal) { mutableStateOf(proteinGoal.toString()) }; val context = LocalContext.current
     AlertDialog(onDismissRequest = onDismiss, confirmButton = { Button(onClick = onDismiss) { Text("Done") } }, title = { Text("Settings & updates") }, text = { Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(14.dp)) {
         Text("USDA API key", fontWeight = FontWeight.Bold); Text(if (hasKey) "A personal key is saved only in this app’s private storage and excluded from backup." else "Using DEMO_KEY: 30 requests/hour and 50/day. Add a personal key for higher limits.", style = MaterialTheme.typography.bodySmall)
@@ -409,6 +419,18 @@ private fun displayDate(epoch: Long): String = Instant.ofEpochMilli(epoch).atZon
         OutlinedTextField(calories, { calories = it.filter(Char::isDigit) }, Modifier.fillMaxWidth(), label = { Text("Calories (800–6000)") }, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number), singleLine = true)
         OutlinedTextField(protein, { protein = it.filter(Char::isDigit) }, Modifier.fillMaxWidth(), label = { Text("Protein grams (20–400)") }, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number), singleLine = true)
         OutlinedButton({ vm.saveGoals(calories.toIntOrNull() ?: 0, protein.toIntOrNull() ?: 0) }, Modifier.fillMaxWidth(), enabled = calories.toIntOrNull() in 800..6000 && protein.toIntOrNull() in 20..400) { Text("Save nutrition goals") }
+        HorizontalDivider(); Text("Portable local backup", fontWeight = FontWeight.Bold)
+        Text("Exports every local data domain, including active workouts and legacy set completions. Private USDA credentials are never included. Import validates the complete file before replacing data, then verifies exact read-back.", style = MaterialTheme.typography.bodySmall)
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Button(exportBackup, Modifier.weight(1f), enabled = backup !is BackupUiState.Working) { Text("Export") }
+            OutlinedButton(importBackup, Modifier.weight(1f), enabled = backup !is BackupUiState.Working) { Text("Import") }
+        }
+        when (backup) {
+            BackupUiState.Idle -> Unit
+            BackupUiState.Working -> StatusRow("Reading and verifying local data…")
+            is BackupUiState.Success -> Text(backup.message, color = MaterialTheme.colorScheme.primary)
+            is BackupUiState.Error -> Text(backup.message, color = MaterialTheme.colorScheme.error)
+        }
         HorizontalDivider(); Text("App update", fontWeight = FontWeight.Bold); Text("Version ${BuildConfig.VERSION_NAME}. Updates come only from the public Vitorhpx/gymbro-native GitHub release.", style = MaterialTheme.typography.bodySmall)
         when (update) {
             UpdateUiState.Idle -> Button({ vm.checkForUpdate() }, Modifier.fillMaxWidth()) { Icon(Icons.Default.CloudDownload, null); Spacer(Modifier.width(8.dp)); Text("Check for update") }

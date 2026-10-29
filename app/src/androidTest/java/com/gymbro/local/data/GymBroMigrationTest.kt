@@ -23,7 +23,7 @@ class GymBroMigrationTest {
     )
 
     @Test
-    fun migration1To2PreservesExistingLogsAndAddsLocalParityTables() {
+    fun migration1To3PreservesExistingLogsAndAddsLocalParityTables() {
         helper.createDatabase(databaseName, 1).apply {
             insert(
                 "food_entries",
@@ -40,7 +40,13 @@ class GymBroMigrationTest {
             close()
         }
 
-        helper.runMigrationsAndValidate(databaseName, 2, true, GymBroDatabase.MIGRATION_1_2).use { db ->
+        helper.runMigrationsAndValidate(
+            databaseName,
+            3,
+            true,
+            GymBroDatabase.MIGRATION_1_2,
+            GymBroDatabase.MIGRATION_2_3,
+        ).use { db ->
             db.query("SELECT foodId, grams, mealSlot FROM food_entries").use { cursor ->
                 assertTrue(cursor.moveToFirst())
                 assertEquals("legacy-food", cursor.getString(0))
@@ -60,5 +66,59 @@ class GymBroMigrationTest {
                 )
             }
         }
+    }
+
+    @Test
+    fun migrationFromOldFreshVersion2PreservesFoodDataAndAutoincrementHighWaterMark() {
+        val version2Database = "$databaseName-v2"
+        helper.createDatabase(version2Database, 2).apply {
+            insert("food_entries", 0, foodEntry(id = 41L, mealSlot = MealSlot.DINNER))
+            insert("food_entries", 0, foodEntry(id = 50L, mealSlot = MealSlot.LUNCH))
+            delete("food_entries", "id = ?", arrayOf("50"))
+            close()
+        }
+
+        helper.runMigrationsAndValidate(
+            version2Database,
+            3,
+            true,
+            GymBroDatabase.MIGRATION_2_3,
+        ).use { db ->
+            db.query(
+                "SELECT id, foodId, name, grams, calorieMilliUnits, proteinMilligrams, loggedAt, mealSlot " +
+                    "FROM food_entries",
+            ).use { cursor ->
+                assertTrue(cursor.moveToFirst())
+                assertEquals(41L, cursor.getLong(0))
+                assertEquals("food-41", cursor.getString(1))
+                assertEquals("Food 41", cursor.getString(2))
+                assertEquals(141, cursor.getInt(3))
+                assertEquals(241_000L, cursor.getLong(4))
+                assertEquals(3_041L, cursor.getLong(5))
+                assertEquals(1_041L, cursor.getLong(6))
+                assertEquals(MealSlot.DINNER.name, cursor.getString(7))
+            }
+
+            db.insert("food_entries", 0, foodEntry(id = null, mealSlot = MealSlot.SNACK))
+            db.query("SELECT id FROM food_entries WHERE foodId = 'food-new'").use { cursor ->
+                assertTrue(cursor.moveToFirst())
+                assertEquals(51L, cursor.getLong(0))
+            }
+            db.query("PRAGMA index_info(`index_food_entries_loggedAt`)").use { cursor ->
+                assertTrue(cursor.moveToFirst())
+                assertEquals("loggedAt", cursor.getString(cursor.getColumnIndexOrThrow("name")))
+            }
+        }
+    }
+
+    private fun foodEntry(id: Long?, mealSlot: MealSlot) = ContentValues().apply {
+        if (id != null) put("id", id)
+        put("foodId", id?.let { "food-$it" } ?: "food-new")
+        put("name", id?.let { "Food $it" } ?: "New food")
+        put("grams", id?.let { 100 + it.toInt() } ?: 100)
+        put("calorieMilliUnits", id?.let { 200_000L + it * 1_000L } ?: 200_000L)
+        put("proteinMilligrams", id?.let { 3_000L + it } ?: 3_000L)
+        put("loggedAt", id?.let { 1_000L + it } ?: 2_000L)
+        put("mealSlot", mealSlot.name)
     }
 }
