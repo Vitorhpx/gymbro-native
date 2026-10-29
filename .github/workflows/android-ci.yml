@@ -33,7 +33,10 @@ jobs:
           cache-read-only: ${{ github.event_name == 'pull_request' }}
 
       - name: Verify, test, and build APKs
-        run: ./gradlew test lint assembleDebug assembleDebugAndroidTest --no-daemon --max-workers=2
+        run: >-
+          ./gradlew testDebugUnitTest lintDebug assembleDebug assembleDebugAndroidTest
+          --no-daemon --max-workers=2
+          -Dorg.gradle.jvmargs="-Xmx2g -XX:MaxMetaspaceSize=1g -Dfile.encoding=UTF-8"
 
       - name: Upload APKs
         if: success()
