@@ -94,6 +94,7 @@ import com.gymbro.local.data.CustomFoodEntity
 import com.gymbro.local.data.ExerciseCompletionEntity
 import com.gymbro.local.data.ExerciseEntity
 import com.gymbro.local.data.PlanExerciseRow
+import com.gymbro.local.data.PreparedMealEntity
 
 import com.gymbro.local.data.MealSlot
 import com.gymbro.local.data.SavedMealItemEntity
@@ -102,8 +103,13 @@ import com.gymbro.local.data.WeightEntryEntity
 import com.gymbro.local.data.WorkoutSessionEntity
 import com.gymbro.local.data.displayCalories
 import com.gymbro.local.data.displayProteinGrams
+import com.gymbro.local.data.datedHistory
+import com.gymbro.local.data.loggedOn
+import com.gymbro.local.data.isRemovableFromUi
 import com.gymbro.local.data.totalCalories
 import com.gymbro.local.data.totalProteinGrams
+import com.gymbro.local.data.planningCompleteFor
+import com.gymbro.local.data.reachablePools
 import com.gymbro.local.domain.SeedData
 import com.gymbro.local.network.FoodSearchValidation
 import com.gymbro.local.ui.AdaptiveLayoutPolicy
@@ -164,6 +170,7 @@ private enum class Tab(val label: String, val icon: ImageVector) {
     val active by vm.active.collectAsState(); val sessions by vm.sessions.collectAsState()
     val exerciseCompletions by vm.exerciseCompletions.collectAsState(); val foods by vm.foodEntries.collectAsState()
     val customFoods by vm.customFoods.collectAsState(); val savedMeals by vm.savedMeals.collectAsState()
+    val preparedMeals by vm.preparedMeals.collectAsState()
     val weights by vm.weights.collectAsState(); val settings by vm.settings.collectAsState()
     val exercises by vm.exercises.collectAsState()
     val planExercises by vm.planExercises.collectAsState()
@@ -218,7 +225,7 @@ private enum class Tab(val label: String, val icon: ImageVector) {
                     when (tab) {
                         Tab.Today -> TodayScreen(active, sessions, foods, weights, planExercises, settings?.calorieGoal ?: 2000, settings?.proteinGoal ?: 160, vm, { tab = it }, { showSettings = true })
                         Tab.Train -> TrainScreen(active, exerciseCompletions, exercises, planExercises, vm, { showSettings = true })
-                        Tab.Eat -> EatScreen(foods, customFoods, savedMeals, settings?.calorieGoal ?: 2000, settings?.proteinGoal ?: 160, search, barcode, vm, scanBarcode, { showSettings = true })
+                        Tab.Eat -> EatScreen(foods, customFoods, savedMeals, preparedMeals, settings?.calorieGoal ?: 2000, settings?.proteinGoal ?: 160, search, barcode, vm, scanBarcode, { showSettings = true })
                         Tab.Progress -> ProgressScreen(sessions, weights, vm, { showSettings = true })
                     }
                         }
@@ -278,11 +285,11 @@ private enum class Tab(val label: String, val icon: ImageVector) {
 }
 
 private fun startOfWeek(): Long = LocalDate.now().with(TemporalAdjusters.previousOrSame(DayOfWeek.MONDAY)).atStartOfDay(ZoneId.systemDefault()).toInstant().toEpochMilli()
-private fun startOfToday(): Long = LocalDate.now().atStartOfDay(ZoneId.systemDefault()).toInstant().toEpochMilli()
+private fun startOfWeekEpochDay(): Long = LocalDate.now().with(TemporalAdjusters.previousOrSame(DayOfWeek.MONDAY)).toEpochDay()
 private fun displayDate(epoch: Long): String = Instant.ofEpochMilli(epoch).atZone(ZoneId.systemDefault()).format(DateTimeFormatter.ofPattern("MMM d, h:mm a"))
 
 @Composable private fun TodayScreen(active: WorkoutSessionEntity?, sessions: List<WorkoutSessionEntity>, foods: List<FoodEntryEntity>, weights: List<WeightEntryEntity>, planRows: List<PlanExerciseRow>, calorieGoal: Int, proteinGoal: Int, vm: MainViewModel, navigate: (Tab) -> Unit, settings: () -> Unit) = Page("Today", "Your daily brief", settings) {
-    val todayFoods = foods.filter { it.loggedAt >= startOfToday() }; val calories = todayFoods.totalCalories(); val protein = todayFoods.totalProteinGrams()
+    val todayFoods = foods.loggedOn(LocalDate.now()); val calories = todayFoods.totalCalories(); val protein = todayFoods.totalProteinGrams()
     val weekSessions = sessions.filter { it.completedAt != null && it.completedAt >= startOfWeek() }
     val persistedDays = planRows.groupBy { it.dayId }.values.mapNotNull { it.firstOrNull() }.sortedBy { it.dayPosition }
     val recommended = persistedDays.firstOrNull { day -> weekSessions.none { it.dayId == day.dayId } } ?: persistedDays.firstOrNull()
@@ -379,8 +386,8 @@ private fun displayDate(epoch: Long): String = Instant.ofEpochMilli(epoch).atZon
     } }, confirmButton = { Button({ vm.editPrescription(row.prescriptionId, sets.toIntOrNull() ?: 0, min.toIntOrNull() ?: 0, max.toIntOrNull() ?: 0, rest.toIntOrNull() ?: -1); dismiss() }) { Text("Save") } }, dismissButton = { OutlinedButton(dismiss) { Text("Cancel") } })
 }
 
-@Composable private fun EatScreen(entries: List<FoodEntryEntity>, customFoods: List<CustomFoodEntity>, savedMeals: List<SavedMealWithItems>, calorieGoal: Int, proteinGoal: Int, search: FoodSearchUiState, barcode: BarcodeUiState, vm: MainViewModel, scanBarcode: () -> Unit, settings: () -> Unit) = Page("Eat", "Fuel the work", settings) {
-    val today = entries.filter { it.loggedAt >= startOfToday() }
+@Composable private fun EatScreen(entries: List<FoodEntryEntity>, customFoods: List<CustomFoodEntity>, savedMeals: List<SavedMealWithItems>, preparedMeals: List<PreparedMealEntity>, calorieGoal: Int, proteinGoal: Int, search: FoodSearchUiState, barcode: BarcodeUiState, vm: MainViewModel, scanBarcode: () -> Unit, settings: () -> Unit) = Page("Eat", "Fuel the work", settings) {
+    val today = entries.loggedOn(LocalDate.now())
     var query by rememberSaveable { mutableStateOf("") }; var grams by rememberSaveable { mutableStateOf("100") }; var slot by rememberSaveable { mutableStateOf(MealSlot.LUNCH) }
     var queryError by remember { mutableStateOf<String?>(null) }; var gramsError by remember { mutableStateOf<String?>(null) }
     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) { Metric("CALORIES", "${today.totalCalories()} / $calorieGoal", if (today.totalCalories() >= calorieGoal * .9) "On target" else "In progress", today.totalCalories() >= calorieGoal * .9, Modifier.weight(1f)); Metric("PROTEIN", "${today.totalProteinGrams()} / $proteinGoal g", if (today.totalProteinGrams() >= proteinGoal) "Complete" else "In progress", today.totalProteinGrams() >= proteinGoal, Modifier.weight(1f)) }
@@ -414,10 +421,18 @@ private fun displayDate(epoch: Long): String = Instant.ofEpochMilli(epoch).atZon
         SeedData.foods.forEach { food -> FilledTonalButton({ vm.logFood(food, grams.toIntOrNull() ?: 0, slot) }, Modifier.fillMaxWidth()) { Text("${food.name} · ${food.caloriesPer100g.toInt()} kcal/100g") } }
     }
     CustomFoodsPanel(customFoods, grams, slot, vm)
+    PreparedMealsPanel(savedMeals, preparedMeals, slot, vm)
     SavedMealsPanel(savedMeals, slot, vm)
     if (today.isNotEmpty()) Panel("Logged today") { MealSlot.entries.forEach { meal ->
-        val mealEntries = today.filter { it.mealSlot == meal }; if (mealEntries.isNotEmpty()) { Text(meal.name.lowercase().replaceFirstChar(Char::uppercase), color = MaterialTheme.colorScheme.secondary, fontWeight = FontWeight.Bold); mealEntries.forEach { entry -> Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) { Column(Modifier.weight(1f)) { Text(entry.name, fontWeight = FontWeight.SemiBold); Text("${entry.grams} g · ${entry.displayCalories()} kcal · ${entry.displayProteinGrams()} g protein", style = MaterialTheme.typography.bodySmall) }; OutlinedButton({ vm.deleteFood(entry.id) }) { Text("Remove") } }; HorizontalDivider() } }
+        val mealEntries = today.filter { it.mealSlot == meal }; if (mealEntries.isNotEmpty()) { Text(meal.name.lowercase().replaceFirstChar(Char::uppercase), color = MaterialTheme.colorScheme.secondary, fontWeight = FontWeight.Bold); mealEntries.forEach { entry -> Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) { Column(Modifier.weight(1f)) { Text(entry.name, fontWeight = FontWeight.SemiBold); Text("${entry.grams} g · ${entry.displayCalories()} kcal · ${entry.displayProteinGrams()} g protein${if (entry.preparedMealId != null) " · prepared portion" else ""}", style = MaterialTheme.typography.bodySmall) }; if (entry.isRemovableFromUi) OutlinedButton({ vm.deleteFood(entry.id) }) { Text("Remove") } }; HorizontalDivider() } }
     } }
+    val history = entries.datedHistory(LocalDate.now())
+    if (history.isNotEmpty()) Panel("Dated history") {
+        history.forEach { (date, rows) ->
+            Text(date.format(DateTimeFormatter.ofPattern("MMM d, yyyy")), fontWeight = FontWeight.Bold)
+            Text("${rows.size} item${if (rows.size == 1) "" else "s"} · ${rows.totalCalories()} kcal · ${rows.totalProteinGrams()} g protein", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+    }
 }
 
 @Composable private fun CustomFoodsPanel(customFoods: List<CustomFoodEntity>, grams: String, slot: MealSlot, vm: MainViewModel) = Panel("Custom foods") {
@@ -429,6 +444,51 @@ private fun displayDate(epoch: Long): String = Instant.ofEpochMilli(epoch).atZon
     }
     Button({ vm.createCustomFood(name, calories.toDoubleOrNull() ?: -1.0, protein.toDoubleOrNull() ?: -1.0); name = ""; calories = ""; protein = "" }, Modifier.fillMaxWidth(), enabled = name.trim().length >= 2 && calories.toDoubleOrNull()?.let { it in 0.0..2000.0 } == true && protein.toDoubleOrNull()?.let { it in 0.0..100.0 } == true) { Text("Save custom food") }
     customFoods.forEach { food -> OutlinedButton({ vm.logFood(food, grams.toIntOrNull() ?: 0, slot) }, Modifier.fillMaxWidth(), enabled = grams.toIntOrNull() in 1..5000) { Text("Log ${food.name} · ${food.calorieMilliUnitsPer100g / 1000.0} kcal/100 g") } }
+}
+
+@Composable private fun PreparedMealsPanel(savedMeals: List<SavedMealWithItems>, preparedMeals: List<PreparedMealEntity>, slot: MealSlot, vm: MainViewModel) = Panel("Weekly prepared meals") {
+    val weekStart = startOfWeekEpochDay()
+    var portions by rememberSaveable { mutableStateOf("4") }
+    var logDate by rememberSaveable { mutableStateOf(LocalDate.now().toString()) }
+    val date = runCatching { LocalDate.parse(logDate) }.getOrNull()
+    val actionStatus by vm.preparedMealAction.collectAsState()
+    Text(
+        if (preparedMeals.planningCompleteFor(weekStart)) "✓ Planning complete for this week" else "Weekly planning is not complete",
+        color = if (preparedMeals.planningCompleteFor(weekStart)) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.tertiary,
+    )
+    Text("Create a flexible portion pool from a saved recipe; no days are assigned.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+    OutlinedTextField(portions, { portions = it.filter(Char::isDigit) }, Modifier.fillMaxWidth(), label = { Text("Planned portions (1–100)") }, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number), singleLine = true)
+    savedMeals.forEach { recipe ->
+        OutlinedButton(
+            { vm.createPreparedMeal(recipe.meal.id, weekStart, portions.toIntOrNull() ?: 0) },
+            Modifier.fillMaxWidth(), enabled = portions.toIntOrNull() in 1..100,
+        ) { Text("Prepare ${recipe.meal.name}") }
+    }
+    HorizontalDivider()
+    OutlinedTextField(logDate, { logDate = it }, Modifier.fillMaxWidth(), label = { Text("Log date (YYYY-MM-DD)") }, isError = date == null, singleLine = true)
+    Text("Logging uses the ${slot.name.lowercase()} slot selected above.", style = MaterialTheme.typography.bodySmall)
+    when (val status = actionStatus) {
+        PreparedMealActionStatus.Idle -> Unit
+        is PreparedMealActionStatus.Success -> Text(status.message, color = MaterialTheme.colorScheme.primary)
+        is PreparedMealActionStatus.Error -> Text(status.message, color = MaterialTheme.colorScheme.error)
+    }
+    preparedMeals.reachablePools().forEach { prepared ->
+        val recipeName = savedMeals.firstOrNull { it.meal.id == prepared.savedMealId }?.meal?.name ?: "Missing recipe"
+        val poolMonday = LocalDate.ofEpochDay(prepared.weekStartEpochDay)
+        val poolSunday = poolMonday.plusDays(6)
+        Text("${poolMonday.format(DateTimeFormatter.ofPattern("MMM d"))}–${poolSunday.format(DateTimeFormatter.ofPattern("MMM d, yyyy"))}", color = MaterialTheme.colorScheme.secondary, fontWeight = FontWeight.Bold)
+        Text("$recipeName · ${prepared.remainingPortions} remaining", fontWeight = FontWeight.Bold)
+        val loggedAt = date?.atTime(12, 0)?.atZone(ZoneId.systemDefault())?.toInstant()?.toEpochMilli()
+        val loggedDateEpochDay = date?.toEpochDay()
+        val dateAllowed = loggedAt != null && loggedDateEpochDay != null && prepared.containsLogDate(loggedDateEpochDay)
+        if (prepared.remainingPortions > 0) {
+            Button({ vm.logPreparedMeal(prepared.id, slot, loggedAt ?: -1, loggedDateEpochDay ?: -1) }, Modifier.fillMaxWidth(), enabled = dateAllowed) { Text("Log 1 portion on ${date ?: "selected date"}") }
+        } else {
+            Button({ vm.logPreparedMeal(prepared.id, slot, loggedAt ?: -1, loggedDateEpochDay ?: -1, addExtra = true) }, Modifier.fillMaxWidth(), enabled = dateAllowed && prepared.plannedPortions < 100) { Text("Add and log extra · 0 remains") }
+        }
+        if (!dateAllowed) Text("Choose a date from $poolMonday through $poolSunday to log this pool.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        OutlinedButton({ vm.archivePreparedMeal(prepared.id) }, Modifier.fillMaxWidth()) { Text("Archive prepared meal") }
+    }
 }
 
 @Composable private fun SavedMealsPanel(savedMeals: List<SavedMealWithItems>, slot: MealSlot, vm: MainViewModel) = Panel("Saved meals & recipes") {
@@ -460,7 +520,7 @@ private fun displayDate(epoch: Long): String = Instant.ofEpochMilli(epoch).atZon
 }
 
 @Composable private fun SupportingPane(tab: Tab, active: WorkoutSessionEntity?, foods: List<FoodEntryEntity>, weights: List<WeightEntryEntity>, modifier: Modifier = Modifier) {
-    Surface(modifier.padding(16.dp), color = MaterialTheme.colorScheme.surface, shape = RoundedCornerShape(28.dp)) { Column(Modifier.padding(24.dp), verticalArrangement = Arrangement.spacedBy(18.dp)) { Text("AT A GLANCE", color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.Bold); Text(when (tab) { Tab.Today -> "Build momentum"; Tab.Train -> "Session guide"; Tab.Eat -> "Today’s fuel"; Tab.Progress -> "Trend line" }, style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Black); HorizontalDivider(); Text(when (tab) { Tab.Today -> active?.let { "${it.dayName} is ready to resume." } ?: "No active workout. Start the recommended session when ready."; Tab.Train -> "Each exercise completion, weight, and reps are persisted immediately, so changing window size or posture will not lose progress."; Tab.Eat -> "${foods.filter { it.loggedAt >= startOfToday() }.size} food entries logged today."; Tab.Progress -> weights.firstOrNull()?.let { "Latest weigh-in: ${it.kilograms} kg." } ?: "Log a weigh-in to begin your trend." }, color = MaterialTheme.colorScheme.onSurfaceVariant) } }
+    Surface(modifier.padding(16.dp), color = MaterialTheme.colorScheme.surface, shape = RoundedCornerShape(28.dp)) { Column(Modifier.padding(24.dp), verticalArrangement = Arrangement.spacedBy(18.dp)) { Text("AT A GLANCE", color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.Bold); Text(when (tab) { Tab.Today -> "Build momentum"; Tab.Train -> "Session guide"; Tab.Eat -> "Today’s fuel"; Tab.Progress -> "Trend line" }, style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Black); HorizontalDivider(); Text(when (tab) { Tab.Today -> active?.let { "${it.dayName} is ready to resume." } ?: "No active workout. Start the recommended session when ready."; Tab.Train -> "Each exercise completion, weight, and reps are persisted immediately, so changing window size or posture will not lose progress."; Tab.Eat -> "${foods.loggedOn(LocalDate.now()).size} food entries logged today."; Tab.Progress -> weights.firstOrNull()?.let { "Latest weigh-in: ${it.kilograms} kg." } ?: "Log a weigh-in to begin your trend." }, color = MaterialTheme.colorScheme.onSurfaceVariant) } }
 }
 
 @Composable private fun SettingsDialog(hasKey: Boolean, update: UpdateUiState, backup: BackupUiState, calorieGoal: Int, proteinGoal: Int, vm: MainViewModel, exportBackup: () -> Unit, importBackup: () -> Unit, onDismiss: () -> Unit) {

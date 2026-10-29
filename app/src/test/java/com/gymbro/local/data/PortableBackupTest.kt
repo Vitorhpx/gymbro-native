@@ -4,6 +4,8 @@ package com.gymbro.local.data
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import java.time.LocalDate
+import java.time.ZoneId
 
 class PortableBackupTest {
     private val codec = PortableBackupCodec()
@@ -25,14 +27,192 @@ class PortableBackupTest {
         exercisePrescriptions = WorkoutPlanSeedData.ppl45v2.prescriptions.sortedWith(compareBy({ it.dayId }, { it.position }, { it.id })),
     )
 
+    private fun preparedBackup(
+        prepared: PreparedMealEntity = PreparedMealEntity("prep-stable", 10, 20_388, 4, 1, false, 700),
+        logIds: List<String> = listOf("log-stable"),
+    ): PortableBackup {
+        val base = validBackup()
+        val loggedAt = LocalDate.ofEpochDay(prepared.weekStartEpochDay)
+            .atTime(12, 0)
+            .atZone(ZoneId.systemDefault())
+            .toInstant()
+            .toEpochMilli()
+        val recipeItems = listOf(
+            SavedMealItemEntity(10, 0, "rice", "Rice", 100, 130_000, 2_700),
+            SavedMealItemEntity(10, 1, "beans", "Beans", 80, 90_000, 6_000),
+        )
+        val rows = logIds.flatMapIndexed { logIndex, logId ->
+            recipeItems.mapIndexed { itemIndex, item ->
+                FoodEntryEntity(
+                    id = 100L + logIndex * 10 + itemIndex,
+                    foodId = "meal-10-${item.foodId}",
+                    name = item.name,
+                    grams = item.grams,
+                    calorieMilliUnits = (item.calorieMilliUnitsPer100g * item.grams + 50) / 100,
+                    proteinMilligrams = (item.proteinMilligramsPer100g * item.grams + 50) / 100,
+                    loggedAt = loggedAt,
+                    mealSlot = MealSlot.LUNCH,
+                    preparedMealId = prepared.id,
+                    preparedLogId = logId,
+                    loggedDateEpochDay = prepared.weekStartEpochDay,
+                )
+            }
+        }
+        return base.copy(
+            foodEntries = rows,
+            savedMealItems = recipeItems,
+            preparedMeals = listOf(prepared),
+        )
+    }
+
+    private fun validationMessage(backup: PortableBackup): String? =
+        runCatching { codec.decodeAndValidate(codec.encode(backup)) }.exceptionOrNull()?.message
+
     @Test fun `round trip preserves every Room domain and active session`() {
-        val expected = validBackup()
+        val expected = preparedBackup()
 
         val decoded = codec.decodeAndValidate(codec.encode(expected))
 
         assertEquals(expected, decoded)
         assertEquals(null, decoded.workoutSessions.single().completedAt)
         assertEquals(1, decoded.setCompletions.size)
+        assertEquals("prep-stable", decoded.preparedMeals.single().id)
+    }
+
+    @Test fun `format v2 remains compatible without prepared meal domain`() {
+        val legacy = codec.encode(validBackup().copy(version = 2, preparedMeals = emptyList()))
+            .replace("\"preparedMeals\":[],", "")
+        val decoded = codec.decodeAndValidate(legacy)
+        assertEquals(2, decoded.version)
+        assertTrue(decoded.preparedMeals.isEmpty())
+    }
+
+    @Test fun `format v2 ignores prepared meal fields from newer writers`() {
+        val legacy = validBackup().copy(
+            version = 2,
+            preparedMeals = listOf(PreparedMealEntity("newer-field", 999, 20_388, 4, 1, false, 700)),
+            foodEntries = listOf(validBackup().foodEntries.single().copy(
+                preparedMealId = "newer-field", preparedLogId = "newer-log", loggedDateEpochDay = 20_388,
+            )),
+        )
+        val decoded = codec.decodeAndValidate(codec.encode(legacy))
+        assertTrue(decoded.preparedMeals.isEmpty())
+        assertEquals(null, decoded.foodEntries.single().preparedMealId)
+        assertEquals(null, decoded.foodEntries.single().preparedLogId)
+        assertEquals(null, decoded.foodEntries.single().loggedDateEpochDay)
+    }
+
+    @Test fun `format v3 rejects invalid prepared counts without rewriting supplied backup`() {
+        val backup = validBackup().copy(preparedMeals = listOf(
+            PreparedMealEntity("invalid-count", 10, 20_388, 0, 9, false, 700),
+        ))
+        val error = runCatching { codec.decodeAndValidate(codec.encode(backup)) }.exceptionOrNull()
+        assertTrue(error is BackupValidationException)
+        assertTrue(error?.message.orEmpty().contains("Invalid prepared meal invalid-count"))
+    }
+
+    @Test fun `format v3 rejects prepared meal referencing missing recipe`() {
+        val backup = validBackup().copy(preparedMeals = listOf(
+            PreparedMealEntity("dangling", 999, 20_388, 4, 1, false, 700),
+        ))
+        val error = runCatching { codec.decodeAndValidate(codec.encode(backup)) }.exceptionOrNull()
+        assertEquals("Prepared meal references missing recipe: dangling/999.", error?.message)
+    }
+
+    @Test fun `format v3 rejects prepared weeks outside renderable LocalDate range`() {
+        listOf(Long.MIN_VALUE, Long.MAX_VALUE - 3).forEach { epochDay ->
+            val backup = validBackup().copy(preparedMeals = listOf(
+                PreparedMealEntity("bad-week", 10, epochDay, 1, 0, false, 700),
+            ))
+
+            val error = runCatching { codec.decodeAndValidate(codec.encode(backup)) }.exceptionOrNull()
+
+            assertEquals(
+                "Invalid prepared meal bad-week: Prepared meal week is outside the supported date range.",
+                error?.message,
+            )
+        }
+    }
+
+    @Test fun `format v3 preserves prepared food lineage exactly`() {
+        val expected = preparedBackup()
+        assertEquals(expected, codec.decodeAndValidate(codec.encode(expected)))
+    }
+
+    @Test fun `format v3 requires prepared log group count to equal logged portions`() {
+        val missing = preparedBackup(logIds = emptyList())
+        val extra = preparedBackup(logIds = listOf("log-one", "log-two"))
+
+        assertEquals("Prepared meal prep-stable has 0 log groups but records 1 logged portions.", validationMessage(missing))
+        assertEquals("Prepared meal prep-stable has 2 log groups but records 1 logged portions.", validationMessage(extra))
+    }
+
+    @Test fun `format v3 validates prepared log group by stable selected date`() {
+        val valid = preparedBackup()
+        val shiftedTimestamp = valid.foodEntries.map { it.copy(loggedAt = it.loggedAt + 7 * 24 * 60 * 60 * 1_000L) }
+
+        assertEquals(
+            valid.copy(foodEntries = shiftedTimestamp),
+            codec.decodeAndValidate(codec.encode(valid.copy(foodEntries = shiftedTimestamp))),
+        )
+
+        val outsideWeek = valid.foodEntries.map { it.copy(loggedDateEpochDay = 20_395) }
+
+        assertEquals(
+            "Prepared food log group log-stable is outside prepared meal week prep-stable.",
+            validationMessage(valid.copy(foodEntries = outsideWeek)),
+        )
+    }
+
+    @Test fun `format v3 rejects inconsistent prepared selected dates within one log group`() {
+        val valid = preparedBackup()
+        val inconsistent = valid.foodEntries.mapIndexed { index, row ->
+            if (index == 0) row else row.copy(loggedDateEpochDay = row.loggedDateEpochDay!! + 1)
+        }
+
+        assertEquals(
+            "Inconsistent prepared food log group: log-stable.",
+            validationMessage(valid.copy(foodEntries = inconsistent)),
+        )
+    }
+
+    @Test fun `format v3 rejects truncated prepared recipe group`() {
+        val valid = preparedBackup()
+
+        assertEquals(
+            "Prepared food log group log-stable does not match recipe 10.",
+            validationMessage(valid.copy(foodEntries = valid.foodEntries.dropLast(1))),
+        )
+    }
+
+    @Test fun `format v3 rejects duplicated prepared recipe row`() {
+        val valid = preparedBackup()
+        val duplicate = valid.foodEntries.first().copy(id = 999)
+
+        assertEquals(
+            "Prepared food log group log-stable does not match recipe 10.",
+            validationMessage(valid.copy(foodEntries = valid.foodEntries + duplicate)),
+        )
+    }
+
+    @Test fun `format v3 rejects fabricated prepared recipe row fields`() {
+        val valid = preparedBackup()
+        val original = valid.foodEntries.first()
+        val mutations = listOf(
+            original.copy(foodId = "meal-10-fabricated"),
+            original.copy(name = "Fabricated"),
+            original.copy(grams = original.grams + 1),
+            original.copy(calorieMilliUnits = original.calorieMilliUnits + 1),
+            original.copy(proteinMilligrams = original.proteinMilligrams + 1),
+        )
+
+        mutations.forEach { mutation ->
+            val rows = valid.foodEntries.map { if (it.id == mutation.id) mutation else it }
+            assertEquals(
+                "Prepared food log group log-stable does not match recipe 10.",
+                validationMessage(valid.copy(foodEntries = rows)),
+            )
+        }
     }
 
     @Test fun `format v1 remains import compatible with absent workout plan domains`() {
@@ -59,11 +239,11 @@ class PortableBackupTest {
     }
 
     @Test fun `unsupported version is rejected`() {
-        val json = codec.encode(validBackup()).replace("\"version\":2", "\"version\":3")
+        val json = codec.encode(validBackup()).replace("\"version\":3", "\"version\":4")
 
         val error = runCatching { codec.decodeAndValidate(json) }.exceptionOrNull()
 
-        assertEquals("Unsupported backup version: 3.", error?.message)
+        assertEquals("Unsupported backup version: 4.", error?.message)
     }
 
     @Test fun `duplicate primary identity is rejected`() {

@@ -12,6 +12,7 @@ import com.gymbro.local.data.FoodEntryEntity
 import com.gymbro.local.data.GymBroDatabase
 import com.gymbro.local.data.MealSlot
 import com.gymbro.local.data.PortableBackupRepository
+import com.gymbro.local.data.PreparedMealEntity
 import com.gymbro.local.data.decodeStrictUtf8
 import com.gymbro.local.data.SavedMealEntity
 import com.gymbro.local.data.SavedMealItemEntity
@@ -74,6 +75,19 @@ sealed interface BackupUiState {
     data class Error(val message: String) : BackupUiState
 }
 
+sealed interface PreparedMealActionStatus {
+    data object Idle : PreparedMealActionStatus
+    data class Success(val message: String) : PreparedMealActionStatus
+    data class Error(val message: String) : PreparedMealActionStatus
+}
+
+internal suspend fun runPreparedMealAction(action: suspend () -> Unit): PreparedMealActionStatus = try {
+    action()
+    PreparedMealActionStatus.Success("Prepared meal updated.")
+} catch (error: IllegalArgumentException) {
+    PreparedMealActionStatus.Error(error.message ?: "Prepared meal changed; refresh and try again.")
+}
+
 object UpdateUiCopy {
     fun downloadButton(release: AppRelease): String = if (release.apk?.sha256 == null) "Download source-validated APK" else "Download APK"
     fun downloadedMessage(downloaded: UpdateUiState.Downloaded): String = when (downloaded.integrity) {
@@ -100,6 +114,7 @@ class MainViewModel(
     val foodEntries = dao.foodEntries().stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
     val customFoods = dao.customFoods().stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
     val savedMeals = dao.savedMeals().stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
+    val preparedMeals = dao.preparedMeals().stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
     val weights = dao.weightEntries().stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
     val settings = dao.settings().stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), null)
     val exercises = dao.exercises().stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
@@ -116,6 +131,8 @@ class MainViewModel(
     val update = _update.asStateFlow()
     private val _backup = MutableStateFlow<BackupUiState>(BackupUiState.Idle)
     val backup = _backup.asStateFlow()
+    private val _preparedMealAction = MutableStateFlow<PreparedMealActionStatus>(PreparedMealActionStatus.Idle)
+    val preparedMealAction = _preparedMealAction.asStateFlow()
     private val _hasPersonalUsdaKey = MutableStateFlow(preferences.contains(USDA_KEY))
     val hasPersonalUsdaKey = _hasPersonalUsdaKey.asStateFlow()
 
@@ -162,6 +179,27 @@ class MainViewModel(
         if (name.trim().length in 2..100 && items.isNotEmpty()) dao.createSavedMeal(SavedMealEntity(name = name.trim(), createdAt = System.currentTimeMillis()), items)
     }
     fun logSavedMeal(meal: SavedMealWithItems, slot: MealSlot) = viewModelScope.launch { dao.logSavedMeal(meal, slot, System.currentTimeMillis()) }
+    fun createPreparedMeal(savedMealId: Long, weekStartEpochDay: Long, plannedPortions: Int) = viewModelScope.launch {
+        val value = PreparedMealEntity(
+            id = "prepared-${UUID.randomUUID()}", savedMealId = savedMealId,
+            weekStartEpochDay = weekStartEpochDay, plannedPortions = plannedPortions,
+            loggedPortions = 0, archived = false, createdAt = System.currentTimeMillis(),
+        )
+        if (value.validationError() == null) dao.createPreparedMeal(value)
+    }
+    fun logPreparedMeal(id: String, slot: MealSlot, loggedAt: Long, loggedDateEpochDay: Long, addExtra: Boolean = false) = viewModelScope.launch {
+        if (loggedAt < 0 || loggedDateEpochDay < 0) {
+            _preparedMealAction.value = PreparedMealActionStatus.Error("Choose a valid date within the prepared meal week.")
+            return@launch
+        }
+        _preparedMealAction.value = runPreparedMealAction {
+            dao.logPreparedPortion(id, slot, loggedAt, loggedDateEpochDay, addExtra)
+        }
+    }
+    fun archivePreparedMeal(id: String) = viewModelScope.launch {
+        _preparedMealAction.value = runPreparedMealAction { dao.archivePreparedMeal(id) }
+    }
+    fun clearPreparedMealStatus() { _preparedMealAction.value = PreparedMealActionStatus.Idle }
 
     fun resolveBarcode(value: String) = viewModelScope.launch {
         _barcode.value = BarcodeUiState.Loading
@@ -216,7 +254,7 @@ class MainViewModel(
                 getApplication<Application>().contentResolver.openOutputStream(uri, "wt")?.bufferedWriter()?.use { it.write(json) }
                     ?: error("Could not open the selected document.")
             }
-            BackupUiState.Success("Backup exported: ${counts.total} records across all 13 data domains.")
+            BackupUiState.Success("Backup exported: ${counts.total} records across all 14 data domains.")
         } catch (e: Exception) {
             BackupUiState.Error(e.message ?: "Backup export failed.")
         }
@@ -241,7 +279,7 @@ class MainViewModel(
                 } ?: error("Could not open the selected document.")
             }
             val counts = backupRepository.importJson(json)
-            BackupUiState.Success("Backup restored and verified: ${counts.total} records across all 13 data domains.")
+            BackupUiState.Success("Backup restored and verified: ${counts.total} records across all 14 data domains.")
         } catch (e: Exception) {
             BackupUiState.Error("Import failed: ${e.message ?: "invalid backup"} Existing data was not changed.")
         }

@@ -18,6 +18,7 @@ data class PortableBackup(
     val customFoods: List<CustomFoodEntity>,
     val savedMeals: List<SavedMealEntity>,
     val savedMealItems: List<SavedMealItemEntity>,
+    val preparedMeals: List<PreparedMealEntity> = emptyList(),
     val weightEntries: List<WeightEntryEntity>,
     val settings: List<SettingsEntity>,
     val exercises: List<ExerciseEntity> = emptyList(),
@@ -25,7 +26,7 @@ data class PortableBackup(
     val workoutPlanDays: List<WorkoutPlanDayEntity> = emptyList(),
     val exercisePrescriptions: List<ExercisePrescriptionEntity> = emptyList(),
 ) {
-    companion object { const val CURRENT_VERSION = 2 }
+    companion object { const val CURRENT_VERSION = 3 }
 }
 
 class BackupValidationException(message: String) : IllegalArgumentException(message)
@@ -60,8 +61,14 @@ class PortableBackupCodec {
         } catch (_: IllegalArgumentException) {
             throw BackupValidationException("Malformed backup JSON.")
         }
-        validate(backup)
-        return backup.canonical()
+        val compatible = if (backup.version < 3) backup.copy(
+            preparedMeals = emptyList(),
+            foodEntries = backup.foodEntries.map {
+                it.copy(preparedMealId = null, preparedLogId = null, loggedDateEpochDay = null)
+            },
+        ) else backup
+        validate(compatible)
+        return compatible.canonical()
     }
 
     private fun validate(value: PortableBackup) {
@@ -79,6 +86,7 @@ class PortableBackupCodec {
         duplicate(value.customFoods.map { it.id })?.let { fail("Duplicate custom food identity: $it.") }
         duplicate(value.savedMeals.map { it.id })?.let { fail("Duplicate saved meal identity: $it.") }
         duplicate(value.savedMealItems.map { it.mealId to it.position })?.let { fail("Duplicate saved meal item identity: ${it.first}/${it.second}.") }
+        duplicate(value.preparedMeals.map { it.id })?.let { fail("Duplicate prepared meal identity: $it.") }
         duplicate(value.weightEntries.map { it.id })?.let { fail("Duplicate weight entry identity: $it.") }
         duplicate(value.settings.map { it.id })?.let { fail("Duplicate settings identity: $it.") }
         duplicate(value.exercises.map { it.id })?.let { fail("Duplicate exercise identity: $it.") }
@@ -86,7 +94,7 @@ class PortableBackupCodec {
         duplicate(value.workoutPlanDays.map { it.id })?.let { fail("Duplicate workout plan day identity: $it.") }
         duplicate(value.exercisePrescriptions.map { it.id })?.let { fail("Duplicate exercise prescription identity: $it.") }
 
-        if (value.version == PortableBackup.CURRENT_VERSION) {
+        if (value.version >= 2) {
             duplicate(value.workoutPlanDays.map { it.planId to it.position })?.let {
                 fail("Duplicate workout plan day position: ${it.first}/${it.second}.")
             }
@@ -162,6 +170,63 @@ class PortableBackupCodec {
             ?.let { fail("Saved meal has no items: ${it.id}.") }
         value.savedMealItems.firstOrNull { it.position < 0 || it.foodId.isBlank() || it.name.isBlank() || it.grams !in 1..5000 || it.calorieMilliUnitsPer100g !in 0..2_000_000 || it.proteinMilligramsPer100g !in 0..100_000 }
             ?.let { fail("Invalid saved meal item ${it.mealId}/${it.position}.") }
+        if (value.version >= 3) value.preparedMeals.firstOrNull { it.validationError() != null }
+            ?.let { fail("Invalid prepared meal ${it.id}: ${it.validationError()}") }
+        if (value.version >= 3) {
+            value.preparedMeals.firstOrNull { it.savedMealId !in mealIds }
+                ?.let { fail("Prepared meal references missing recipe: ${it.id}/${it.savedMealId}.") }
+            val preparedIds = value.preparedMeals.mapTo(mutableSetOf()) { it.id }
+            value.foodEntries.firstOrNull {
+                listOf(it.preparedMealId, it.preparedLogId, it.loggedDateEpochDay).count { field -> field != null } !in setOf(0, 3) ||
+                    it.preparedMealId?.isBlank() == true || it.preparedLogId?.isBlank() == true ||
+                    (it.preparedMealId != null && it.preparedMealId !in preparedIds)
+            }?.let { fail("Invalid prepared food lineage ${it.id}.") }
+            value.foodEntries.filter { it.preparedLogId != null }.groupBy { it.preparedLogId }.values
+                .firstOrNull { rows ->
+                    rows.map { it.preparedMealId }.distinct().size != 1 ||
+                        rows.map { it.loggedAt }.distinct().size != 1 ||
+                        rows.map { it.loggedDateEpochDay }.distinct().size != 1 ||
+                        rows.map { it.mealSlot }.distinct().size != 1
+                }
+                ?.let { fail("Inconsistent prepared food log group: ${it.first().preparedLogId}.") }
+            val preparedLogsByPool = value.foodEntries
+                .filter { it.preparedLogId != null }
+                .groupBy { it.preparedMealId }
+                .mapValues { (_, rows) -> rows.groupBy { it.preparedLogId!! } }
+            val recipeItemsByMeal = value.savedMealItems.groupBy { it.mealId }
+            value.preparedMeals.forEach { prepared ->
+                val logGroups = preparedLogsByPool[prepared.id].orEmpty()
+                if (logGroups.size != prepared.loggedPortions) {
+                    fail("Prepared meal ${prepared.id} has ${logGroups.size} log groups but records ${prepared.loggedPortions} logged portions.")
+                }
+                val expectedRows = recipeItemsByMeal.getValue(prepared.savedMealId).map { item ->
+                    PreparedRecipeRow(
+                        foodId = "meal-${prepared.savedMealId}-${item.foodId}",
+                        name = item.name,
+                        grams = item.grams,
+                        calorieMilliUnits = (item.calorieMilliUnitsPer100g * item.grams + 50) / 100,
+                        proteinMilligrams = (item.proteinMilligramsPer100g * item.grams + 50) / 100,
+                    )
+                }.groupingBy { it }.eachCount()
+                logGroups.forEach { (logId, rows) ->
+                    if (!prepared.containsLogDate(rows.first().loggedDateEpochDay!!)) {
+                        fail("Prepared food log group $logId is outside prepared meal week ${prepared.id}.")
+                    }
+                    val actualRows = rows.map { row ->
+                        PreparedRecipeRow(
+                            row.foodId,
+                            row.name,
+                            row.grams,
+                            row.calorieMilliUnits,
+                            row.proteinMilligrams,
+                        )
+                    }.groupingBy { it }.eachCount()
+                    if (actualRows != expectedRows) {
+                        fail("Prepared food log group $logId does not match recipe ${prepared.savedMealId}.")
+                    }
+                }
+            }
+        }
         value.weightEntries.firstOrNull { it.id <= 0 || !it.kilograms.isFinite() || it.kilograms !in 25.0..400.0 || it.loggedAt < 0 }
             ?.let { fail("Invalid weight entry ${it.id}.") }
         if (value.settings.size != 1 || value.settings.single().id != 1 || value.settings.single().calorieGoal !in 800..6000 || value.settings.single().proteinGoal !in 20..400) {
@@ -206,6 +271,7 @@ class PortableBackupCodec {
         customFoods = customFoods.sortedBy { it.id },
         savedMeals = savedMeals.sortedBy { it.id },
         savedMealItems = savedMealItems.sortedWith(compareBy({ it.mealId }, { it.position })),
+        preparedMeals = preparedMeals.sortedBy { it.id },
         weightEntries = weightEntries.sortedBy { it.id },
         settings = settings.sortedBy { it.id },
         exercises = exercises.sortedBy { it.id },
@@ -214,10 +280,19 @@ class PortableBackupCodec {
         exercisePrescriptions = exercisePrescriptions.sortedWith(compareBy({ it.dayId }, { it.position }, { it.id })),
     )
 
+
     private fun <T> duplicate(values: List<T>): T? {
         val seen = mutableSetOf<T>()
         return values.firstOrNull { !seen.add(it) }
     }
 
     private fun fail(message: String): Nothing = throw BackupValidationException(message)
+
+    private data class PreparedRecipeRow(
+        val foodId: String,
+        val name: String,
+        val grams: Int,
+        val calorieMilliUnits: Long,
+        val proteinMilligrams: Long,
+    )
 }

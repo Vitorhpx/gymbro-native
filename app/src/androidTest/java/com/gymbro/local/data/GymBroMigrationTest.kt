@@ -156,6 +156,33 @@ class GymBroMigrationTest {
         }
     }
 
+    @Test
+    fun migration4To5PreservesExistingDataAndAddsPreparedMealPool() {
+        val version4Database = "$databaseName-v4"
+        helper.createDatabase(version4Database, 4).apply {
+            insert("saved_meals", 0, ContentValues().apply {
+                put("id", 12L); put("name", "Existing recipe"); put("createdAt", 99L)
+            })
+            close()
+        }
+
+        helper.runMigrationsAndValidate(version4Database, 5, true, GymBroDatabase.MIGRATION_4_5).use { db ->
+            db.query("SELECT name FROM saved_meals WHERE id=12").use { cursor ->
+                assertTrue(cursor.moveToFirst())
+                assertEquals("Existing recipe", cursor.getString(0))
+            }
+            db.query("PRAGMA table_info(food_entries)").use { cursor ->
+                val columns = buildSet { while (cursor.moveToNext()) add(cursor.getString(cursor.getColumnIndexOrThrow("name"))) }
+                assertTrue(columns.containsAll(setOf("preparedMealId", "preparedLogId", "loggedDateEpochDay")))
+            }
+            db.execSQL("INSERT INTO prepared_meals VALUES ('prepared-stable',12,20388,4,1,0,100)")
+            db.query("SELECT plannedPortions, loggedPortions FROM prepared_meals WHERE id='prepared-stable'").use { cursor ->
+                assertTrue(cursor.moveToFirst())
+                assertEquals(4, cursor.getInt(0)); assertEquals(1, cursor.getInt(1))
+            }
+        }
+    }
+
     private fun assertUniqueConstraint(db: androidx.sqlite.db.SupportSQLiteDatabase, sql: String) {
         try {
             db.execSQL(sql)

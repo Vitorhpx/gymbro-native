@@ -23,6 +23,11 @@ import com.gymbro.local.domain.FoodPreset
 import com.gymbro.local.network.UsdaFood
 import kotlinx.coroutines.flow.Flow
 import kotlinx.serialization.Serializable
+import java.time.Instant
+import java.time.LocalDate
+import java.time.ZoneId
+import java.util.SortedMap
+import java.util.UUID
 import kotlin.math.roundToLong
 
 @Entity(tableName = "workout_sessions", indices = [Index(value = ["completedAt"])])
@@ -67,7 +72,7 @@ class GymBroConverters {
     @TypeConverter fun mealSlot(value: MealSlot): String = value.name
 }
 
-@Entity(tableName = "food_entries", indices = [Index(value = ["loggedAt"])])
+@Entity(tableName = "food_entries", indices = [Index(value = ["loggedAt"]), Index(value = ["preparedMealId"]), Index(value = ["preparedLogId"])])
 @Serializable
 data class FoodEntryEntity(
     @PrimaryKey(autoGenerate = true) val id: Long = 0,
@@ -79,6 +84,9 @@ data class FoodEntryEntity(
     val loggedAt: Long,
     @ColumnInfo(defaultValue = "'SNACK'")
     val mealSlot: MealSlot = MealSlot.SNACK,
+    val preparedMealId: String? = null,
+    val preparedLogId: String? = null,
+    val loggedDateEpochDay: Long? = null,
 ) {
     companion object {
         fun from(food: FoodPreset, grams: Int, loggedAt: Long, mealSlot: MealSlot = MealSlot.SNACK) = FoodEntryEntity(
@@ -143,14 +151,83 @@ data class SavedMealWithItems(
     @Relation(parentColumn = "id", entityColumn = "mealId") val items: List<SavedMealItemEntity>,
 )
 
-fun SavedMealWithItems.toFoodEntries(slot: MealSlot, loggedAt: Long): List<FoodEntryEntity> = items.map { item ->
+@Entity(
+    tableName = "prepared_meals",
+    indices = [Index("savedMealId"), Index(value = ["weekStartEpochDay", "archived"])],
+)
+@Serializable
+data class PreparedMealEntity(
+    @PrimaryKey val id: String,
+    val savedMealId: Long,
+    val weekStartEpochDay: Long,
+    val plannedPortions: Int,
+    val loggedPortions: Int,
+    val archived: Boolean,
+    val createdAt: Long,
+) {
+    val remainingPortions: Int get() = plannedPortions - loggedPortions
+
+    fun validationError(): String? = when {
+        id.isBlank() || id.length > 100 -> "Prepared meal ID is invalid."
+        savedMealId <= 0 -> "Prepared meal recipe is invalid."
+        weekStartEpochDay !in MIN_WEEK_START_EPOCH_DAY..MAX_WEEK_START_EPOCH_DAY ->
+            "Prepared meal week is outside the supported date range."
+        weekStartEpochDay % 7 != 4L -> "Prepared meal week must start on Monday."
+        plannedPortions !in 1..100 -> "Planned portions must be from 1 to 100."
+        loggedPortions !in 0..plannedPortions -> "Logged portions must be between zero and planned portions."
+        createdAt < 0 -> "Prepared meal creation time is invalid."
+        else -> null
+    }
+
+    fun containsLogDate(loggedDateEpochDay: Long): Boolean =
+        weekStartEpochDay in MIN_WEEK_START_EPOCH_DAY..MAX_WEEK_START_EPOCH_DAY &&
+            loggedDateEpochDay >= weekStartEpochDay && loggedDateEpochDay <= weekStartEpochDay + 6
+
+    companion object {
+        val MIN_WEEK_START_EPOCH_DAY: Long = LocalDate.of(1970, 1, 5).toEpochDay()
+        val MAX_WEEK_START_EPOCH_DAY: Long = LocalDate.of(9999, 12, 20).toEpochDay()
+    }
+}
+
+fun Iterable<PreparedMealEntity>.planningCompleteFor(weekStartEpochDay: Long): Boolean =
+    any { !it.archived && it.weekStartEpochDay == weekStartEpochDay && it.plannedPortions > 0 }
+
+fun Iterable<PreparedMealEntity>.reachablePools(): List<PreparedMealEntity> =
+    filterNot { it.archived }.sortedWith(compareByDescending<PreparedMealEntity> { it.weekStartEpochDay }.thenByDescending { it.createdAt })
+
+val FoodEntryEntity.isRemovableFromUi: Boolean get() = preparedMealId == null
+
+fun SavedMealWithItems.toFoodEntries(
+    slot: MealSlot,
+    loggedAt: Long,
+    preparedMealId: String? = null,
+    preparedLogId: String? = null,
+    loggedDateEpochDay: Long? = null,
+): List<FoodEntryEntity> = items.map { item ->
     FoodEntryEntity(
         foodId = "meal-${meal.id}-${item.foodId}", name = item.name, grams = item.grams,
         calorieMilliUnits = (item.calorieMilliUnitsPer100g * item.grams + 50) / 100,
         proteinMilligrams = (item.proteinMilligramsPer100g * item.grams + 50) / 100,
         loggedAt = loggedAt, mealSlot = slot,
+        preparedMealId = preparedMealId, preparedLogId = preparedLogId,
+        loggedDateEpochDay = loggedDateEpochDay,
     )
 }
+
+fun FoodEntryEntity.loggedDate(zoneId: ZoneId = ZoneId.systemDefault()): LocalDate =
+    loggedDateEpochDay?.let(LocalDate::ofEpochDay)
+        ?: Instant.ofEpochMilli(loggedAt).atZone(zoneId).toLocalDate()
+
+fun Iterable<FoodEntryEntity>.loggedOn(date: LocalDate, zoneId: ZoneId = ZoneId.systemDefault()): List<FoodEntryEntity> =
+    filter { it.loggedDate(zoneId) == date }
+
+fun Iterable<FoodEntryEntity>.datedHistory(
+    today: LocalDate,
+    zoneId: ZoneId = ZoneId.systemDefault(),
+): SortedMap<LocalDate, List<FoodEntryEntity>> =
+    filterNot { it.loggedDate(zoneId) == today }
+        .groupBy { it.loggedDate(zoneId) }
+        .toSortedMap(compareByDescending { it })
 
 fun Iterable<FoodEntryEntity>.totalCalories(): Int =
     ((sumOf { it.calorieMilliUnits } + 500) / 1_000).toInt()
@@ -196,6 +273,7 @@ interface GymBroDao {
     @Query("SELECT * FROM custom_foods ORDER BY id") suspend fun allCustomFoodsOnce(): List<CustomFoodEntity>
     @Query("SELECT * FROM saved_meals ORDER BY id") suspend fun allSavedMealsOnce(): List<SavedMealEntity>
     @Query("SELECT * FROM saved_meal_items ORDER BY mealId, position") suspend fun allSavedMealItemsOnce(): List<SavedMealItemEntity>
+    @Query("SELECT * FROM prepared_meals ORDER BY id") suspend fun allPreparedMealsOnce(): List<PreparedMealEntity>
     @Query("SELECT * FROM weight_entries ORDER BY id") suspend fun allWeightEntriesOnce(): List<WeightEntryEntity>
     @Query("SELECT * FROM settings ORDER BY id") suspend fun allSettingsOnce(): List<SettingsEntity>
     @Query("SELECT * FROM exercises ORDER BY id") suspend fun allExercisesOnce(): List<ExerciseEntity>
@@ -210,6 +288,7 @@ interface GymBroDao {
     @Insert suspend fun restoreCustomFoods(values: List<CustomFoodEntity>)
     @Insert suspend fun restoreSavedMeals(values: List<SavedMealEntity>)
     @Insert suspend fun restoreSavedMealItems(values: List<SavedMealItemEntity>)
+    @Insert suspend fun restorePreparedMeals(values: List<PreparedMealEntity>)
     @Insert suspend fun restoreWeightEntries(values: List<WeightEntryEntity>)
     @Insert suspend fun restoreSettings(values: List<SettingsEntity>)
     @Insert suspend fun restoreExercises(values: List<ExerciseEntity>)
@@ -220,6 +299,7 @@ interface GymBroDao {
     @Query("DELETE FROM set_completions") suspend fun clearSetCompletions()
     @Query("DELETE FROM exercise_completions") suspend fun clearExerciseCompletions()
     @Query("DELETE FROM saved_meal_items") suspend fun clearSavedMealItems()
+    @Query("DELETE FROM prepared_meals") suspend fun clearPreparedMeals()
     @Query("DELETE FROM workout_sessions") suspend fun clearSessions()
     @Query("DELETE FROM food_entries") suspend fun clearFoodEntries()
     @Query("DELETE FROM custom_foods") suspend fun clearCustomFoods()
@@ -305,7 +385,7 @@ interface GymBroDao {
     @Query("SELECT * FROM food_entries ORDER BY loggedAt DESC")
     fun foodEntries(): Flow<List<FoodEntryEntity>>
     @Insert suspend fun insertFood(value: FoodEntryEntity)
-    @Query("DELETE FROM food_entries WHERE id=:id") suspend fun deleteFood(id: Long)
+    @Query("DELETE FROM food_entries WHERE id=:id AND preparedMealId IS NULL") suspend fun deleteFood(id: Long): Int
 
     @Query("SELECT * FROM custom_foods ORDER BY name") fun customFoods(): Flow<List<CustomFoodEntity>>
     @Insert suspend fun insertCustomFood(value: CustomFoodEntity): Long
@@ -313,6 +393,9 @@ interface GymBroDao {
     @Transaction
     @Query("SELECT * FROM saved_meals ORDER BY name")
     fun savedMeals(): Flow<List<SavedMealWithItems>>
+    @Transaction
+    @Query("SELECT * FROM saved_meals WHERE id=:id")
+    suspend fun savedMeal(id: Long): SavedMealWithItems?
     @Insert suspend fun insertSavedMeal(value: SavedMealEntity): Long
     @Insert suspend fun insertSavedMealItems(values: List<SavedMealItemEntity>)
     @Transaction suspend fun createSavedMeal(meal: SavedMealEntity, items: List<SavedMealItemEntity>): Long {
@@ -322,6 +405,39 @@ interface GymBroDao {
     }
     @Transaction suspend fun logSavedMeal(meal: SavedMealWithItems, slot: MealSlot, loggedAt: Long) {
         meal.toFoodEntries(slot, loggedAt).forEach { insertFood(it) }
+    }
+
+    @Query("SELECT * FROM prepared_meals ORDER BY weekStartEpochDay DESC, createdAt DESC")
+    fun preparedMeals(): Flow<List<PreparedMealEntity>>
+    @Query("SELECT * FROM prepared_meals WHERE id=:id") suspend fun preparedMeal(id: String): PreparedMealEntity?
+    @Insert suspend fun insertPreparedMeal(value: PreparedMealEntity)
+    @Query("UPDATE prepared_meals SET loggedPortions=loggedPortions+1 WHERE id=:id AND archived=0 AND loggedPortions < plannedPortions")
+    suspend fun consumePreparedPortion(id: String): Int
+    @Query("UPDATE prepared_meals SET plannedPortions=plannedPortions+1, loggedPortions=loggedPortions+1 WHERE id=:id AND archived=0 AND loggedPortions=plannedPortions AND plannedPortions < 100")
+    suspend fun addAndConsumeExtraPortion(id: String): Int
+    @Query("UPDATE prepared_meals SET archived=1 WHERE id=:id AND archived=0") suspend fun archivePreparedMealGuarded(id: String): Int
+
+    @Transaction suspend fun createPreparedMeal(value: PreparedMealEntity) {
+        require(value.validationError() == null) { value.validationError()!! }
+        require(savedMeal(value.savedMealId) != null) { "Saved recipe does not exist." }
+        insertPreparedMeal(value)
+    }
+
+    @Transaction suspend fun logPreparedPortion(id: String, slot: MealSlot, loggedAt: Long, loggedDateEpochDay: Long, addExtra: Boolean = false) {
+        require(loggedAt >= 0) { "Log date is invalid." }
+        val prepared = requireNotNull(preparedMeal(id)) { "Prepared meal does not exist." }
+        require(!prepared.archived) { "Prepared meal is archived." }
+        require(prepared.containsLogDate(loggedDateEpochDay)) { "Log date must be within the prepared meal week." }
+        val recipe = requireNotNull(savedMeal(prepared.savedMealId)) { "Saved recipe does not exist." }
+        require(recipe.items.isNotEmpty()) { "Saved recipe has no items." }
+        val changed = if (addExtra) addAndConsumeExtraPortion(id) else consumePreparedPortion(id)
+        require(changed == 1) { if (addExtra) "Extra portion cannot be added." else "No prepared portions remain." }
+        val logId = "prepared-log-${UUID.randomUUID()}"
+        recipe.toFoodEntries(slot, loggedAt, prepared.id, logId, loggedDateEpochDay).forEach { insertFood(it) }
+    }
+
+    @Transaction suspend fun archivePreparedMeal(id: String) {
+        require(archivePreparedMealGuarded(id) == 1) { "Prepared meal is missing or already archived." }
     }
 
     @Query("SELECT * FROM weight_entries ORDER BY loggedAt DESC")
@@ -334,8 +450,8 @@ interface GymBroDao {
 }
 
 @Database(
-    entities = [WorkoutSessionEntity::class, SetCompletionEntity::class, ExerciseCompletionEntity::class, FoodEntryEntity::class, CustomFoodEntity::class, SavedMealEntity::class, SavedMealItemEntity::class, WeightEntryEntity::class, SettingsEntity::class, ExerciseEntity::class, WorkoutPlanEntity::class, WorkoutPlanDayEntity::class, ExercisePrescriptionEntity::class],
-    version = 4,
+    entities = [WorkoutSessionEntity::class, SetCompletionEntity::class, ExerciseCompletionEntity::class, FoodEntryEntity::class, CustomFoodEntity::class, SavedMealEntity::class, SavedMealItemEntity::class, PreparedMealEntity::class, WeightEntryEntity::class, SettingsEntity::class, ExerciseEntity::class, WorkoutPlanEntity::class, WorkoutPlanDayEntity::class, ExercisePrescriptionEntity::class],
+    version = 5,
     exportSchema = true,
 )
 @TypeConverters(GymBroConverters::class)
@@ -346,7 +462,7 @@ abstract class GymBroDatabase : RoomDatabase() {
         @Volatile private var instance: GymBroDatabase? = null
         fun get(context: Context): GymBroDatabase = instance ?: synchronized(this) {
             instance ?: Room.databaseBuilder(context.applicationContext, GymBroDatabase::class.java, "gymbro.db")
-                .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4)
+                .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5)
                 .build().also { instance = it }
         }
 
@@ -401,6 +517,19 @@ abstract class GymBroDatabase : RoomDatabase() {
                 db.execSQL("INSERT INTO workout_plans VALUES (?,?,?,?,?,?)", arrayOf<Any>(seed.plan.id, seed.plan.name, seed.plan.description, seed.plan.sessionsPerWeek, seed.plan.estimatedMinutes, 1))
                 seed.days.forEach { db.execSQL("INSERT INTO workout_plan_days VALUES (?,?,?,?,?)", arrayOf<Any>(it.id, it.planId, it.name, it.position, 1)) }
                 seed.prescriptions.forEach { db.execSQL("INSERT INTO exercise_prescriptions VALUES (?,?,?,?,?,?,?,?,?)", arrayOf<Any>(it.id, it.dayId, it.exerciseId, it.position, it.sets, it.minReps, it.maxReps, it.restSeconds, 1)) }
+            }
+        }
+
+        val MIGRATION_4_5 = object : Migration(4, 5) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE `food_entries` ADD COLUMN `preparedMealId` TEXT")
+                db.execSQL("ALTER TABLE `food_entries` ADD COLUMN `preparedLogId` TEXT")
+                db.execSQL("ALTER TABLE `food_entries` ADD COLUMN `loggedDateEpochDay` INTEGER")
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_food_entries_preparedMealId` ON `food_entries` (`preparedMealId`)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_food_entries_preparedLogId` ON `food_entries` (`preparedLogId`)")
+                db.execSQL("CREATE TABLE IF NOT EXISTS `prepared_meals` (`id` TEXT NOT NULL, `savedMealId` INTEGER NOT NULL, `weekStartEpochDay` INTEGER NOT NULL, `plannedPortions` INTEGER NOT NULL, `loggedPortions` INTEGER NOT NULL, `archived` INTEGER NOT NULL, `createdAt` INTEGER NOT NULL, PRIMARY KEY(`id`))")
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_prepared_meals_savedMealId` ON `prepared_meals` (`savedMealId`)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_prepared_meals_weekStartEpochDay_archived` ON `prepared_meals` (`weekStartEpochDay`, `archived`)")
             }
         }
     }
