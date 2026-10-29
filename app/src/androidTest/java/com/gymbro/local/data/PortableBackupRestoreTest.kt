@@ -8,6 +8,7 @@ import kotlinx.coroutines.runBlocking
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -29,9 +30,10 @@ class PortableBackupRestoreTest {
 
     @Test fun restorePreservesIdsActiveStateLegacySetsAndExactCounts() = runBlocking {
         val dao = database.dao()
+        dao.reconcileWorkoutSeeds()
         dao.restoreSessions(listOf(WorkoutSessionEntity(7, "push", "Push", 100, null)))
-        dao.restoreSetCompletions(listOf(SetCompletionEntity(7, "bench", 0)))
-        dao.restoreExerciseCompletions(listOf(ExerciseCompletionEntity(7, "bench", 50_000, 8, 120)))
+        dao.restoreSetCompletions(listOf(SetCompletionEntity(7, "chest-press", 0)))
+        dao.restoreExerciseCompletions(listOf(ExerciseCompletionEntity(7, "chest-press", 50_000, 8, 120)))
         dao.restoreFoodEntries(listOf(FoodEntryEntity(8, "rice", "Rice", 100, 130_000, 2_700, 130, MealSlot.LUNCH)))
         dao.restoreCustomFoods(listOf(CustomFoodEntity(9, "Food", 100_000, 10_000, 140)))
         dao.restoreSavedMeals(listOf(SavedMealEntity(10, "Meal", 150)))
@@ -45,10 +47,10 @@ class PortableBackupRestoreTest {
         val restoredCounts = repository.importJson(json)
 
         assertEquals(exportedCounts, restoredCounts)
-        assertEquals(9, restoredCounts.total)
+        assertEquals(57, restoredCounts.total)
         assertEquals(7, dao.allSessionsOnce().single().id)
         assertNull(dao.allSessionsOnce().single().completedAt)
-        assertEquals(SetCompletionEntity(7, "bench", 0), dao.allSetCompletionsOnce().single())
+        assertEquals(SetCompletionEntity(7, "chest-press", 0), dao.allSetCompletionsOnce().single())
         assertEquals(10, dao.allSavedMealItemsOnce().single().mealId)
     }
 
@@ -59,5 +61,37 @@ class PortableBackupRestoreTest {
         runCatching { repository.importJson("not-json") }
 
         assertEquals(listOf(WorkoutSessionEntity(7, "push", "Push", 100, null)), dao.allSessionsOnce())
+    }
+
+    @Test fun freshDatabaseExportContainsRequiredSeedsAndIsImportable() = runBlocking {
+        val (json, counts) = repository.exportJson()
+
+        val decoded = PortableBackupCodec().decodeAndValidate(json)
+        val restoredCounts = repository.importJson(json)
+
+        assertEquals(WorkoutPlanSeedData.ppl45v2.exercises.sortedBy { it.id }, decoded.exercises)
+        assertEquals(
+            WorkoutPlanSeedData.ppl45v2.prescriptions.sortedWith(compareBy({ it.dayId }, { it.position }, { it.id })),
+            decoded.exercisePrescriptions,
+        )
+        assertEquals(1, decoded.settings.size)
+        assertEquals(counts, restoredCounts)
+    }
+
+    @Test fun loweringPrescriptionSetsDoesNotMakeExportedV2BackupUnrestorable() = runBlocking {
+        val dao = database.dao()
+        dao.ensureSettings(SettingsEntity())
+        dao.reconcileWorkoutSeeds()
+        dao.restoreSessions(listOf(WorkoutSessionEntity(7, "push", "Push", 100, 200)))
+        dao.restoreSetCompletions(listOf(SetCompletionEntity(7, "chest-press", 2)))
+        dao.editPrescription("push-chest-press", 2, 6, 10, 120)
+
+        val (json, exportedCounts) = repository.exportJson()
+        val restoredCounts = repository.importJson(json)
+
+        assertEquals(exportedCounts, restoredCounts)
+        assertEquals(SetCompletionEntity(7, "chest-press", 2), dao.allSetCompletionsOnce().single())
+        assertEquals(2, dao.prescription("push-chest-press")!!.sets)
+        assertTrue(json.contains("\"version\":2"))
     }
 }

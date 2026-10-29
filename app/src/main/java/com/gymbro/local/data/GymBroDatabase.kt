@@ -181,6 +181,12 @@ data class SettingsEntity(
     val proteinGoal: Int = 160,
 )
 
+data class PlanExerciseRow(
+    val prescriptionId: String, val dayId: String, val dayName: String, val dayPosition: Int,
+    val exerciseId: String, val exerciseName: String, val exercisePosition: Int,
+    val sets: Int, val minReps: Int, val maxReps: Int, val restSeconds: Int,
+)
+
 @Dao
 interface GymBroDao {
     @Query("SELECT * FROM workout_sessions ORDER BY id") suspend fun allSessionsOnce(): List<WorkoutSessionEntity>
@@ -192,6 +198,10 @@ interface GymBroDao {
     @Query("SELECT * FROM saved_meal_items ORDER BY mealId, position") suspend fun allSavedMealItemsOnce(): List<SavedMealItemEntity>
     @Query("SELECT * FROM weight_entries ORDER BY id") suspend fun allWeightEntriesOnce(): List<WeightEntryEntity>
     @Query("SELECT * FROM settings ORDER BY id") suspend fun allSettingsOnce(): List<SettingsEntity>
+    @Query("SELECT * FROM exercises ORDER BY id") suspend fun allExercisesOnce(): List<ExerciseEntity>
+    @Query("SELECT * FROM workout_plans ORDER BY id") suspend fun allWorkoutPlansOnce(): List<WorkoutPlanEntity>
+    @Query("SELECT * FROM workout_plan_days ORDER BY planId, position") suspend fun allWorkoutPlanDaysOnce(): List<WorkoutPlanDayEntity>
+    @Query("SELECT * FROM exercise_prescriptions ORDER BY dayId, position") suspend fun allExercisePrescriptionsOnce(): List<ExercisePrescriptionEntity>
 
     @Insert suspend fun restoreSessions(values: List<WorkoutSessionEntity>)
     @Insert suspend fun restoreSetCompletions(values: List<SetCompletionEntity>)
@@ -202,6 +212,10 @@ interface GymBroDao {
     @Insert suspend fun restoreSavedMealItems(values: List<SavedMealItemEntity>)
     @Insert suspend fun restoreWeightEntries(values: List<WeightEntryEntity>)
     @Insert suspend fun restoreSettings(values: List<SettingsEntity>)
+    @Insert suspend fun restoreExercises(values: List<ExerciseEntity>)
+    @Insert suspend fun restoreWorkoutPlans(values: List<WorkoutPlanEntity>)
+    @Insert suspend fun restoreWorkoutPlanDays(values: List<WorkoutPlanDayEntity>)
+    @Insert suspend fun restoreExercisePrescriptions(values: List<ExercisePrescriptionEntity>)
 
     @Query("DELETE FROM set_completions") suspend fun clearSetCompletions()
     @Query("DELETE FROM exercise_completions") suspend fun clearExerciseCompletions()
@@ -212,6 +226,52 @@ interface GymBroDao {
     @Query("DELETE FROM saved_meals") suspend fun clearSavedMeals()
     @Query("DELETE FROM weight_entries") suspend fun clearWeightEntries()
     @Query("DELETE FROM settings") suspend fun clearSettings()
+    @Query("DELETE FROM exercise_prescriptions") suspend fun clearExercisePrescriptions()
+    @Query("DELETE FROM workout_plan_days") suspend fun clearWorkoutPlanDays()
+    @Query("DELETE FROM workout_plans") suspend fun clearWorkoutPlans()
+    @Query("DELETE FROM exercises") suspend fun clearExercises()
+
+    @Query("SELECT * FROM exercises ORDER BY name") fun exercises(): Flow<List<ExerciseEntity>>
+    @Query("SELECT * FROM workout_plans ORDER BY name") fun workoutPlans(): Flow<List<WorkoutPlanEntity>>
+    @Query("""SELECT p.id AS prescriptionId, d.id AS dayId, d.name AS dayName, d.position AS dayPosition,
+        e.id AS exerciseId, e.name AS exerciseName, p.position AS exercisePosition,
+        p.sets, p.minReps, p.maxReps, p.restSeconds FROM exercise_prescriptions p
+        JOIN workout_plan_days d ON d.id=p.dayId JOIN exercises e ON e.id=p.exerciseId
+        WHERE d.planId=:planId ORDER BY d.position, p.position""")
+    fun planExercises(planId: String): Flow<List<PlanExerciseRow>>
+    @Insert(onConflict = OnConflictStrategy.REPLACE) suspend fun upsertExercise(value: ExerciseEntity)
+    @Insert(onConflict = OnConflictStrategy.REPLACE) suspend fun upsertPlan(value: WorkoutPlanEntity)
+    @Insert(onConflict = OnConflictStrategy.REPLACE) suspend fun upsertPlanDay(value: WorkoutPlanDayEntity)
+    @Insert(onConflict = OnConflictStrategy.REPLACE) suspend fun upsertPrescription(value: ExercisePrescriptionEntity)
+    @Query("SELECT * FROM exercises WHERE id=:id") suspend fun exercise(id: String): ExerciseEntity?
+    @Query("SELECT * FROM workout_plans WHERE id=:id") suspend fun workoutPlan(id: String): WorkoutPlanEntity?
+    @Query("SELECT * FROM workout_plan_days WHERE id=:id") suspend fun workoutPlanDay(id: String): WorkoutPlanDayEntity?
+    @Query("SELECT * FROM exercise_prescriptions WHERE id=:id") suspend fun prescription(id: String): ExercisePrescriptionEntity?
+    @Query("SELECT * FROM exercise_prescriptions WHERE dayId=:dayId ORDER BY position") suspend fun dayPrescriptions(dayId: String): List<ExercisePrescriptionEntity>
+    @Transaction suspend fun reconcileWorkoutSeeds(seed: WorkoutPlanSeed = WorkoutPlanSeedData.ppl45v2) {
+        seed.exercises.forEach { if (exercise(it.id)?.isSeeded != false) upsertExercise(it) }
+        if (workoutPlan(seed.plan.id)?.isSeeded != false) upsertPlan(seed.plan)
+        seed.days.forEach { if (workoutPlanDay(it.id)?.isSeeded != false) upsertPlanDay(it) }
+        seed.prescriptions.forEach { if (prescription(it.id)?.isSeeded != false) upsertPrescription(it) }
+    }
+    @Query("UPDATE exercise_prescriptions SET sets=:sets,minReps=:minReps,maxReps=:maxReps,restSeconds=:restSeconds,isSeeded=0 WHERE id=:id")
+    suspend fun editPrescription(id: String, sets: Int, minReps: Int, maxReps: Int, restSeconds: Int)
+    @Query("UPDATE exercise_prescriptions SET position=:position,isSeeded=0 WHERE id=:id")
+    suspend fun setPrescriptionPosition(id: String, position: Int)
+    @Transaction suspend fun swapPrescriptionPositions(first: ExercisePrescriptionEntity, second: ExercisePrescriptionEntity) {
+        setPrescriptionPosition(first.id, -1)
+        setPrescriptionPosition(second.id, first.position)
+        setPrescriptionPosition(first.id, second.position)
+    }
+    @Transaction suspend fun movePrescription(dayId: String, prescriptionId: String, direction: Int): Boolean {
+        if (direction !in setOf(-1, 1)) return false
+        val rows = dayPrescriptions(dayId)
+        val index = rows.indexOfFirst { it.id == prescriptionId }
+        val target = index + direction
+        if (index !in rows.indices || target !in rows.indices) return false
+        swapPrescriptionPositions(rows[index], rows[target])
+        return true
+    }
 
     @Query("SELECT * FROM workout_sessions WHERE completedAt IS NULL ORDER BY startedAt DESC LIMIT 1")
     fun activeSession(): Flow<WorkoutSessionEntity?>
@@ -274,8 +334,8 @@ interface GymBroDao {
 }
 
 @Database(
-    entities = [WorkoutSessionEntity::class, SetCompletionEntity::class, ExerciseCompletionEntity::class, FoodEntryEntity::class, CustomFoodEntity::class, SavedMealEntity::class, SavedMealItemEntity::class, WeightEntryEntity::class, SettingsEntity::class],
-    version = 3,
+    entities = [WorkoutSessionEntity::class, SetCompletionEntity::class, ExerciseCompletionEntity::class, FoodEntryEntity::class, CustomFoodEntity::class, SavedMealEntity::class, SavedMealItemEntity::class, WeightEntryEntity::class, SettingsEntity::class, ExerciseEntity::class, WorkoutPlanEntity::class, WorkoutPlanDayEntity::class, ExercisePrescriptionEntity::class],
+    version = 4,
     exportSchema = true,
 )
 @TypeConverters(GymBroConverters::class)
@@ -286,7 +346,7 @@ abstract class GymBroDatabase : RoomDatabase() {
         @Volatile private var instance: GymBroDatabase? = null
         fun get(context: Context): GymBroDatabase = instance ?: synchronized(this) {
             instance ?: Room.databaseBuilder(context.applicationContext, GymBroDatabase::class.java, "gymbro.db")
-                .addMigrations(MIGRATION_1_2, MIGRATION_2_3)
+                .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4)
                 .build().also { instance = it }
         }
 
@@ -322,6 +382,25 @@ abstract class GymBroDatabase : RoomDatabase() {
                 db.execSQL("ALTER TABLE `food_entries_new` RENAME TO `food_entries`")
                 db.execSQL("UPDATE `sqlite_sequence` SET `name` = 'food_entries' WHERE `name` = 'food_entries_new'")
                 db.execSQL("CREATE INDEX `index_food_entries_loggedAt` ON `food_entries` (`loggedAt`)")
+            }
+        }
+
+        val MIGRATION_3_4 = object : Migration(3, 4) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("CREATE TABLE IF NOT EXISTS `exercises` (`id` TEXT NOT NULL, `name` TEXT NOT NULL, `muscleGroup` TEXT NOT NULL, `category` TEXT NOT NULL, `isSeeded` INTEGER NOT NULL, PRIMARY KEY(`id`))")
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_exercises_name` ON `exercises` (`name`)")
+                db.execSQL("CREATE TABLE IF NOT EXISTS `workout_plans` (`id` TEXT NOT NULL, `name` TEXT NOT NULL, `description` TEXT NOT NULL, `sessionsPerWeek` INTEGER NOT NULL, `estimatedMinutes` INTEGER NOT NULL, `isSeeded` INTEGER NOT NULL, PRIMARY KEY(`id`))")
+                db.execSQL("CREATE TABLE IF NOT EXISTS `workout_plan_days` (`id` TEXT NOT NULL, `planId` TEXT NOT NULL, `name` TEXT NOT NULL, `position` INTEGER NOT NULL, `isSeeded` INTEGER NOT NULL, PRIMARY KEY(`id`))")
+                db.execSQL("CREATE UNIQUE INDEX IF NOT EXISTS `index_workout_plan_days_planId_position` ON `workout_plan_days` (`planId`, `position`)")
+                db.execSQL("CREATE TABLE IF NOT EXISTS `exercise_prescriptions` (`id` TEXT NOT NULL, `dayId` TEXT NOT NULL, `exerciseId` TEXT NOT NULL, `position` INTEGER NOT NULL, `sets` INTEGER NOT NULL, `minReps` INTEGER NOT NULL, `maxReps` INTEGER NOT NULL, `restSeconds` INTEGER NOT NULL, `isSeeded` INTEGER NOT NULL, PRIMARY KEY(`id`))")
+                db.execSQL("CREATE UNIQUE INDEX IF NOT EXISTS `index_exercise_prescriptions_dayId_position` ON `exercise_prescriptions` (`dayId`, `position`)")
+                db.execSQL("CREATE UNIQUE INDEX IF NOT EXISTS `index_exercise_prescriptions_dayId_exerciseId` ON `exercise_prescriptions` (`dayId`, `exerciseId`)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_exercise_prescriptions_exerciseId` ON `exercise_prescriptions` (`exerciseId`)")
+                val seed = WorkoutPlanSeedData.ppl45v2
+                seed.exercises.forEach { db.execSQL("INSERT INTO exercises VALUES (?,?,?,?,?)", arrayOf<Any>(it.id, it.name, it.muscleGroup, it.category, 1)) }
+                db.execSQL("INSERT INTO workout_plans VALUES (?,?,?,?,?,?)", arrayOf<Any>(seed.plan.id, seed.plan.name, seed.plan.description, seed.plan.sessionsPerWeek, seed.plan.estimatedMinutes, 1))
+                seed.days.forEach { db.execSQL("INSERT INTO workout_plan_days VALUES (?,?,?,?,?)", arrayOf<Any>(it.id, it.planId, it.name, it.position, 1)) }
+                seed.prescriptions.forEach { db.execSQL("INSERT INTO exercise_prescriptions VALUES (?,?,?,?,?,?,?,?,?)", arrayOf<Any>(it.id, it.dayId, it.exerciseId, it.position, it.sets, it.minReps, it.maxReps, it.restSeconds, 1)) }
             }
         }
     }

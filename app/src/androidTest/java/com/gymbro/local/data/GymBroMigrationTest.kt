@@ -7,6 +7,7 @@ import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
+import org.junit.Assert.fail
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -108,6 +109,59 @@ class GymBroMigrationTest {
                 assertTrue(cursor.moveToFirst())
                 assertEquals("loggedAt", cursor.getString(cursor.getColumnIndexOrThrow("name")))
             }
+        }
+    }
+
+    @Test
+    fun migration3To4PreservesExistingDataAndSeedsPersistentPplPlan() {
+        val version3Database = "$databaseName-v3"
+        helper.createDatabase(version3Database, 3).apply {
+            insert("weight_entries", 0, ContentValues().apply {
+                put("kilograms", 80.5)
+                put("loggedAt", 1234L)
+            })
+            close()
+        }
+
+        helper.runMigrationsAndValidate(
+            version3Database,
+            4,
+            true,
+            GymBroDatabase.MIGRATION_3_4,
+        ).use { db ->
+            db.query("SELECT kilograms FROM weight_entries").use { cursor ->
+                assertTrue(cursor.moveToFirst())
+                assertEquals(80.5, cursor.getDouble(0), 0.0)
+            }
+            db.query("SELECT name, isSeeded FROM workout_plans WHERE id='gymbro-ppl-45-v2'").use { cursor ->
+                assertTrue(cursor.moveToFirst())
+                assertEquals("GymBro PPL 45 V2", cursor.getString(0))
+                assertEquals(1, cursor.getInt(1))
+            }
+            db.query("SELECT COUNT(*) FROM exercises").use { cursor ->
+                assertTrue(cursor.moveToFirst())
+                assertEquals(29, cursor.getInt(0))
+            }
+            db.query("SELECT COUNT(*) FROM exercise_prescriptions").use { cursor ->
+                assertTrue(cursor.moveToFirst())
+                assertEquals(15, cursor.getInt(0))
+            }
+            db.query("SELECT COUNT(*) FROM exercises WHERE id='triceps-pushdown'").use { cursor ->
+                assertTrue(cursor.moveToFirst())
+                assertEquals(1, cursor.getInt(0))
+            }
+            assertUniqueConstraint(db, "INSERT INTO workout_plan_days VALUES ('duplicate-day','gymbro-ppl-45-v2','Duplicate',0,0)")
+            assertUniqueConstraint(db, "INSERT INTO exercise_prescriptions VALUES ('duplicate-position','push','incline-press',0,2,8,12,90,0)")
+            assertUniqueConstraint(db, "INSERT INTO exercise_prescriptions VALUES ('duplicate-exercise','push','chest-press',99,2,8,12,90,0)")
+        }
+    }
+
+    private fun assertUniqueConstraint(db: androidx.sqlite.db.SupportSQLiteDatabase, sql: String) {
+        try {
+            db.execSQL(sql)
+            fail("Expected unique constraint failure for: $sql")
+        } catch (_: android.database.sqlite.SQLiteConstraintException) {
+            // Expected.
         }
     }
 

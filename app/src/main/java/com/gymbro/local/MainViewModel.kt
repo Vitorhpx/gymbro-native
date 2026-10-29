@@ -7,6 +7,7 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.gymbro.local.data.CustomFoodEntity
 import com.gymbro.local.data.ExerciseCompletionEntity
+import com.gymbro.local.data.ExerciseEntity
 import com.gymbro.local.data.FoodEntryEntity
 import com.gymbro.local.data.GymBroDatabase
 import com.gymbro.local.data.MealSlot
@@ -39,6 +40,7 @@ import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
+import java.util.UUID
 import kotlin.math.roundToLong
 
 sealed interface FoodSearchUiState {
@@ -100,6 +102,8 @@ class MainViewModel(
     val savedMeals = dao.savedMeals().stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
     val weights = dao.weightEntries().stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
     val settings = dao.settings().stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), null)
+    val exercises = dao.exercises().stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
+    val planExercises = dao.planExercises("gymbro-ppl-45-v2").stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
 
     private val foodSearchCoordinator = FoodSearchCoordinator(viewModelScope) { query ->
         val key = preferences.getString(USDA_KEY, null)?.takeIf(String::isNotBlank) ?: DEMO_KEY
@@ -115,7 +119,7 @@ class MainViewModel(
     private val _hasPersonalUsdaKey = MutableStateFlow(preferences.contains(USDA_KEY))
     val hasPersonalUsdaKey = _hasPersonalUsdaKey.asStateFlow()
 
-    init { viewModelScope.launch { dao.ensureSettings(SettingsEntity()) } }
+    init { viewModelScope.launch { dao.ensureSettings(SettingsEntity()); dao.reconcileWorkoutSeeds() } }
 
     fun startWorkout(dayId: String, dayName: String) = viewModelScope.launch {
         dao.startSessionIfNone(WorkoutSessionEntity(dayId = dayId, dayName = dayName, startedAt = System.currentTimeMillis()))
@@ -127,6 +131,19 @@ class MainViewModel(
         } else dao.uncompleteExercise(sessionId, exerciseId)
     }
     fun completeWorkout(id: Long) = viewModelScope.launch { dao.completeSession(id, System.currentTimeMillis()) }
+    fun createExercise(name: String, muscleGroup: String, category: String) = viewModelScope.launch {
+        val clean = name.trim()
+        if (clean.length !in 2..100) return@launch
+        dao.upsertExercise(ExerciseEntity("custom-${UUID.randomUUID()}", clean, muscleGroup.trim().ifBlank { "other" }, category.trim().ifBlank { "other" }, false))
+    }
+    fun editPrescription(id: String, sets: Int, minReps: Int, maxReps: Int, restSeconds: Int) = viewModelScope.launch {
+        if (sets in 1..20 && minReps in 1..100 && maxReps in minReps..100 && restSeconds in 0..1800) {
+            dao.editPrescription(id, sets, minReps, maxReps, restSeconds)
+        }
+    }
+    fun moveExercise(dayId: String, prescriptionId: String, direction: Int) = viewModelScope.launch {
+        dao.movePrescription(dayId, prescriptionId, direction)
+    }
 
     fun logFood(food: FoodPreset, grams: Int, slot: MealSlot = MealSlot.SNACK) = viewModelScope.launch {
         if (grams in 1..5000) dao.insertFood(FoodEntryEntity.from(food, grams, System.currentTimeMillis(), slot))
@@ -199,7 +216,7 @@ class MainViewModel(
                 getApplication<Application>().contentResolver.openOutputStream(uri, "wt")?.bufferedWriter()?.use { it.write(json) }
                     ?: error("Could not open the selected document.")
             }
-            BackupUiState.Success("Backup exported: ${counts.total} records across all 9 data domains.")
+            BackupUiState.Success("Backup exported: ${counts.total} records across all 13 data domains.")
         } catch (e: Exception) {
             BackupUiState.Error(e.message ?: "Backup export failed.")
         }
@@ -224,7 +241,7 @@ class MainViewModel(
                 } ?: error("Could not open the selected document.")
             }
             val counts = backupRepository.importJson(json)
-            BackupUiState.Success("Backup restored and verified: ${counts.total} records across all 9 data domains.")
+            BackupUiState.Success("Backup restored and verified: ${counts.total} records across all 13 data domains.")
         } catch (e: Exception) {
             BackupUiState.Error("Import failed: ${e.message ?: "invalid backup"} Existing data was not changed.")
         }
