@@ -14,7 +14,17 @@ data class BarcodeProduct(
     val name: String,
     val caloriesPer100g: Double,
     val proteinPer100g: Double,
-)
+) {
+    fun validationError(): String? =
+        if (
+            caloriesPer100g.isFinite() && caloriesPer100g in 0.0..900.0 &&
+            proteinPer100g.isFinite() && proteinPer100g in 0.0..100.0
+        ) null else INVALID_NUTRITION
+
+    companion object {
+        const val INVALID_NUTRITION = "This product has invalid nutrition per 100 g."
+    }
+}
 
 class BarcodeLookupException(message: String, cause: Throwable? = null) : IOException(message, cause)
 
@@ -48,7 +58,9 @@ class OpenFoodFactsParser(private val json: Json = Json { ignoreUnknownKeys = tr
         if (product.name.isBlank() || calories == null || protein == null) {
             throw BarcodeLookupException("This product is missing calories or protein per 100 g.")
         }
-        return BarcodeProduct(name = product.name, caloriesPer100g = calories, proteinPer100g = protein)
+        val parsed = BarcodeProduct(name = product.name, caloriesPer100g = calories, proteinPer100g = protein)
+        parsed.validationError()?.let { throw BarcodeLookupException(it) }
+        return parsed
     }
 }
 

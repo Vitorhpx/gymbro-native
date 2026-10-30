@@ -209,6 +209,10 @@ class MainViewModel(
     fun barcodeScanFailed(message: String) { _barcode.value = BarcodeUiState.Error(message) }
     fun clearBarcode() { _barcode.value = BarcodeUiState.Idle }
     fun logBarcodeProduct(product: BarcodeProduct, grams: Int, slot: MealSlot) = viewModelScope.launch {
+        product.validationError()?.let {
+            _barcode.value = BarcodeUiState.Error(it)
+            return@launch
+        }
         if (grams !in 1..5000) return@launch
         dao.insertFood(FoodEntryEntity(
             foodId = "off-${product.barcode}", name = product.name, grams = grams,
