@@ -28,6 +28,7 @@ import com.gymbro.local.network.FoodSearchValidation
 import com.gymbro.local.network.HttpOpenFoodFactsResolver
 import com.gymbro.local.network.HttpUsdaFoodSearchService
 import com.gymbro.local.network.UsdaFood
+import com.gymbro.local.reminders.ReminderScheduler
 import com.gymbro.local.update.ApkIntegrity
 import com.gymbro.local.update.AppRelease
 import com.gymbro.local.update.AppUpdateService
@@ -109,7 +110,7 @@ class MainViewModel(
     private val database = GymBroDatabase.get(application)
     private val dao = database.dao()
     private val backupRepository = PortableBackupRepository(database)
-    private val preferences = application.getSharedPreferences(PRIVATE_SETTINGS, Context.MODE_PRIVATE)
+    private val preferences = application.getSharedPreferences(ReminderScheduler.PREFERENCES, Context.MODE_PRIVATE)
     val active = dao.activeSession().stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), null)
     val sessions = dao.sessions().stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
     val exerciseCompletions = dao.exerciseCompletions().stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
@@ -137,8 +138,13 @@ class MainViewModel(
     val preparedMealAction = _preparedMealAction.asStateFlow()
     private val _hasPersonalUsdaKey = MutableStateFlow(preferences.contains(USDA_KEY))
     val hasPersonalUsdaKey = _hasPersonalUsdaKey.asStateFlow()
+    private val _remindersEnabled = MutableStateFlow(preferences.getBoolean(ReminderScheduler.ENABLED_KEY, false))
+    val remindersEnabled = _remindersEnabled.asStateFlow()
 
-    init { viewModelScope.launch { dao.ensureSettings(SettingsEntity()); dao.reconcileWorkoutSeeds() } }
+    init {
+        viewModelScope.launch { dao.ensureSettings(SettingsEntity()); dao.reconcileWorkoutSeeds() }
+        if (_remindersEnabled.value) ReminderScheduler.ensureScheduled(application)
+    }
 
     fun startWorkout(dayId: String, dayName: String) = viewModelScope.launch {
         dao.startSessionIfNone(WorkoutSessionEntity(dayId = dayId, dayName = dayName, startedAt = System.currentTimeMillis()))
@@ -245,6 +251,11 @@ class MainViewModel(
         preferences.edit().apply { if (clean.isEmpty()) remove(USDA_KEY) else putString(USDA_KEY, clean) }.apply()
         _hasPersonalUsdaKey.value = clean.isNotEmpty()
     }
+    fun setHabitRemindersEnabled(enabled: Boolean) {
+        preferences.edit().putBoolean(ReminderScheduler.ENABLED_KEY, enabled).apply()
+        _remindersEnabled.value = enabled
+        if (enabled) ReminderScheduler.replaceScheduled(getApplication()) else ReminderScheduler.cancel(getApplication())
+    }
     fun checkForUpdate() = viewModelScope.launch {
         _update.value = UpdateUiState.Checking
         _update.value = try {
@@ -315,7 +326,6 @@ class MainViewModel(
     }
 
     companion object {
-        private const val PRIVATE_SETTINGS = "private_settings"
         private const val USDA_KEY = "usda_api_key"
         const val DEMO_KEY = "DEMO_KEY"
         private const val MAX_BACKUP_BYTES = 20 * 1024 * 1024

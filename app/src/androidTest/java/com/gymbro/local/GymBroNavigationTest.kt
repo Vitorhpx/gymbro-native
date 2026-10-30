@@ -27,6 +27,8 @@ class GymBroNavigationTest {
         compose.onNodeWithText("Recent weeks").assertIsDisplayed()
         compose.onNodeWithContentDescription("Settings").performClick()
         compose.onNodeWithText("Settings & updates").assertIsDisplayed()
+        compose.onNodeWithText("Habit reminders").assertIsDisplayed()
+        compose.onNodeWithText("Enable reminders").assertIsDisplayed()
         compose.onNodeWithText("Check for update").assertIsDisplayed()
     }
 

@@ -1,6 +1,8 @@
 package com.gymbro.local
 
+import android.Manifest
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Bundle
 import android.provider.Settings
@@ -72,6 +74,7 @@ import androidx.compose.material3.adaptive.layout.calculateThreePaneScaffoldValu
 import androidx.compose.material3.adaptive.navigationsuite.NavigationSuiteScaffold
 import androidx.compose.material3.adaptive.navigationsuite.NavigationSuiteType
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -92,6 +95,7 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.core.content.FileProvider
+import androidx.core.content.ContextCompat
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.gymbro.local.data.FoodEntryEntity
 import com.gymbro.local.data.HabitDay
@@ -191,12 +195,22 @@ private enum class Tab(val label: String, val icon: ImageVector) {
     val backup by vm.backup.collectAsState()
     val barcode by vm.barcode.collectAsState()
     val hasKey by vm.hasPersonalUsdaKey.collectAsState()
+    val remindersEnabled by vm.remindersEnabled.collectAsState()
+    val context = LocalContext.current
+    val notificationPermissionGranted = android.os.Build.VERSION.SDK_INT < 33 ||
+        ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED
+    LaunchedEffect(remindersEnabled, notificationPermissionGranted) {
+        if (remindersEnabled && !notificationPermissionGranted) vm.setHabitRemindersEnabled(false)
+    }
     val today = rememberCurrentLocalDate()
     val weekdayCalories = settings?.calorieGoal ?: 2000
     val weekendCalories = settings?.weekendCalorieGoal ?: weekdayCalories
     val todayCalories = if (today.dayOfWeek in setOf(DayOfWeek.SATURDAY, DayOfWeek.SUNDAY)) weekendCalories else weekdayCalories
     val createBackup = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/json")) { uri -> uri?.let(vm::exportBackup) }
     val openBackup = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri -> uri?.let(vm::importBackup) }
+    val requestNotifications = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+        if (granted) vm.setHabitRemindersEnabled(true)
+    }
     val adaptiveInfo = currentWindowAdaptiveInfo()
 
     NavigationSuiteScaffold(
@@ -257,7 +271,13 @@ private enum class Tab(val label: String, val icon: ImageVector) {
         }
     }
     if (showSettings) SettingsDialog(
-        hasKey, update, backup, weekdayCalories, weekendCalories, settings?.proteinGoal ?: 160, vm,
+        hasKey, remindersEnabled, update, backup, weekdayCalories, weekendCalories, settings?.proteinGoal ?: 160, vm,
+        onRemindersChanged = { enabled ->
+            if (!enabled) vm.setHabitRemindersEnabled(false)
+            else if (android.os.Build.VERSION.SDK_INT < 33 || ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED) {
+                vm.setHabitRemindersEnabled(true)
+            } else requestNotifications.launch(Manifest.permission.POST_NOTIFICATIONS)
+        },
         exportBackup = { createBackup.launch("gymbro-backup.json") },
         importBackup = { openBackup.launch(arrayOf("application/json", "text/json", "text/plain")) },
         onDismiss = { showSettings = false },
@@ -716,10 +736,19 @@ private fun displayDate(epoch: Long): String = Instant.ofEpochMilli(epoch).atZon
     Surface(modifier.padding(16.dp), color = MaterialTheme.colorScheme.surface, shape = RoundedCornerShape(28.dp)) { Column(Modifier.padding(24.dp), verticalArrangement = Arrangement.spacedBy(18.dp)) { Text("AT A GLANCE", color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.Bold); Text(when (tab) { Tab.Today -> "Build momentum"; Tab.Train -> "Session guide"; Tab.Eat -> "Today’s fuel"; Tab.Progress -> "Trend line" }, style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Black); HorizontalDivider(); Text(when (tab) { Tab.Today -> active?.let { "${it.dayName} is ready to resume." } ?: "No active workout. Start the recommended session when ready."; Tab.Train -> "Each exercise completion, weight, and reps are persisted immediately, so changing window size or posture will not lose progress."; Tab.Eat -> "${foods.loggedOn(today).size} food entries logged today."; Tab.Progress -> weights.firstOrNull()?.let { "Latest weigh-in: ${it.kilograms} kg." } ?: "Log a weigh-in to begin your trend." }, color = MaterialTheme.colorScheme.onSurfaceVariant) } }
 }
 
-@Composable private fun SettingsDialog(hasKey: Boolean, update: UpdateUiState, backup: BackupUiState, weekdayCalorieGoal: Int, weekendCalorieGoal: Int, proteinGoal: Int, vm: MainViewModel, exportBackup: () -> Unit, importBackup: () -> Unit, onDismiss: () -> Unit) {
+@Composable private fun SettingsDialog(hasKey: Boolean, remindersEnabled: Boolean, update: UpdateUiState, backup: BackupUiState, weekdayCalorieGoal: Int, weekendCalorieGoal: Int, proteinGoal: Int, vm: MainViewModel, onRemindersChanged: (Boolean) -> Unit, exportBackup: () -> Unit, importBackup: () -> Unit, onDismiss: () -> Unit) {
     var apiKey by rememberSaveable { mutableStateOf("") }; var weekdayCalories by rememberSaveable(weekdayCalorieGoal) { mutableStateOf(weekdayCalorieGoal.toString()) }; var weekendCalories by rememberSaveable(weekendCalorieGoal) { mutableStateOf(weekendCalorieGoal.toString()) }; var protein by rememberSaveable(proteinGoal) { mutableStateOf(proteinGoal.toString()) }; val context = LocalContext.current
     AlertDialog(onDismissRequest = onDismiss, confirmButton = { Button(onClick = onDismiss) { Text("Done") } }, title = { Text("Settings & updates") }, text = { Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(14.dp)) {
-        Text("USDA API key", fontWeight = FontWeight.Bold); Text(if (hasKey) "A personal key is saved only in this app’s private storage and excluded from backup." else "Using DEMO_KEY: 30 requests/hour and 50/day. Add a personal key for higher limits.", style = MaterialTheme.typography.bodySmall)
+        Text("Habit reminders", fontWeight = FontWeight.Bold)
+        Text("At about 7:30 PM, GymBro checks unfinished food logging. Monday, Wednesday, and Friday can include a workout reminder; Sunday can include weigh-in and meal-planning reminders. Completed tasks are never included.", style = MaterialTheme.typography.bodySmall)
+        if (remindersEnabled) {
+            Text("✓ Reminders enabled", color = MaterialTheme.colorScheme.primary)
+            OutlinedButton({ onRemindersChanged(false) }, Modifier.fillMaxWidth()) { Text("Disable reminders") }
+        } else {
+            Text("Reminders are off. Android will ask for notification permission when you enable them.", color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Button({ onRemindersChanged(true) }, Modifier.fillMaxWidth()) { Text("Enable reminders") }
+        }
+        HorizontalDivider(); Text("USDA API key", fontWeight = FontWeight.Bold); Text(if (hasKey) "A personal key is saved only in this app’s private storage and excluded from backup." else "Using DEMO_KEY: 30 requests/hour and 50/day. Add a personal key for higher limits.", style = MaterialTheme.typography.bodySmall)
         OutlinedTextField(apiKey, { apiKey = it }, Modifier.fillMaxWidth(), label = { Text(if (hasKey) "Replace personal key" else "Personal key (optional)") }, visualTransformation = PasswordVisualTransformation(), singleLine = true)
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) { Button({ vm.saveUsdaKey(apiKey); apiKey = "" }, enabled = apiKey.isNotBlank()) { Text("Save key") }; if (hasKey) OutlinedButton({ vm.saveUsdaKey("") }) { Text("Use DEMO_KEY") } }
         HorizontalDivider(); Text("Nutrition & habit targets", fontWeight = FontWeight.Bold)
