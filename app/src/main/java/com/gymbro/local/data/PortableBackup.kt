@@ -7,6 +7,9 @@ import kotlinx.serialization.json.Json
 import java.nio.ByteBuffer
 import java.nio.charset.CodingErrorAction
 import java.nio.charset.StandardCharsets
+import java.time.LocalDate
+
+private val MAX_SUPPORTED_EPOCH_DAY = LocalDate.of(9999, 12, 31).toEpochDay()
 
 @Serializable
 data class PortableBackup(
@@ -26,7 +29,7 @@ data class PortableBackup(
     val workoutPlanDays: List<WorkoutPlanDayEntity> = emptyList(),
     val exercisePrescriptions: List<ExercisePrescriptionEntity> = emptyList(),
 ) {
-    companion object { const val CURRENT_VERSION = 3 }
+    companion object { const val CURRENT_VERSION = 4 }
 }
 
 class BackupValidationException(message: String) : IllegalArgumentException(message)
@@ -61,12 +64,22 @@ class PortableBackupCodec {
         } catch (_: IllegalArgumentException) {
             throw BackupValidationException("Malformed backup JSON.")
         }
-        val compatible = if (backup.version < 3) backup.copy(
+        var compatible = backup
+        if (compatible.version < 3) compatible = compatible.copy(
             preparedMeals = emptyList(),
-            foodEntries = backup.foodEntries.map {
+            foodEntries = compatible.foodEntries.map {
                 it.copy(preparedMealId = null, preparedLogId = null, loggedDateEpochDay = null)
             },
-        ) else backup
+        )
+        if (compatible.version < 4) {
+            val legacyCalorieTarget = compatible.settings.firstOrNull { it.id == 1 }?.calorieGoal
+            compatible = compatible.copy(
+                workoutSessions = compatible.workoutSessions.map { it.copy(completedDateEpochDay = null) },
+                foodEntries = compatible.foodEntries.map { it.copy(calorieTarget = legacyCalorieTarget) },
+                weightEntries = compatible.weightEntries.map { it.copy(loggedDateEpochDay = null) },
+                settings = compatible.settings.map { it.copy(weekendCalorieGoal = it.calorieGoal) },
+            )
+        }
         validate(compatible)
         return compatible.canonical()
     }
@@ -123,7 +136,11 @@ class PortableBackupCodec {
         val persistedPrescriptions = value.exercisePrescriptions.groupBy { it.dayId }
         val sessionsById = value.workoutSessions.associateBy { it.id }
         val validSessionDayIds = if (value.version == 1) legacyDaysById.keys else persistedDayIds
-        value.workoutSessions.firstOrNull { it.id <= 0 || it.dayId !in validSessionDayIds || it.dayName.isBlank() || it.startedAt < 0 || (it.completedAt != null && it.completedAt < it.startedAt) }
+        value.workoutSessions.firstOrNull {
+            it.id <= 0 || it.dayId !in validSessionDayIds || it.dayName.isBlank() || it.startedAt < 0 ||
+                (it.completedAt != null && it.completedAt < it.startedAt) ||
+                (it.completedDateEpochDay != null && (it.completedAt == null || it.completedDateEpochDay !in 0..MAX_SUPPORTED_EPOCH_DAY))
+        }
             ?.let { fail("Invalid workout session ${it.id}.") }
         if (value.workoutSessions.count { it.completedAt == null } > 1) fail("Backup contains multiple active workout sessions.")
         value.setCompletions.forEach { completion ->
@@ -158,7 +175,7 @@ class PortableBackupCodec {
                 fail("Exercise completion time is outside session ${session.id}: ${completion.exerciseId}.")
             }
         }
-        value.foodEntries.firstOrNull { it.id <= 0 || it.foodId.isBlank() || it.name.isBlank() || it.grams !in 1..5000 || it.calorieMilliUnits < 0 || it.proteinMilligrams < 0 || it.loggedAt < 0 }
+        value.foodEntries.firstOrNull { it.id <= 0 || it.foodId.isBlank() || it.name.isBlank() || it.grams !in 1..5000 || it.calorieMilliUnits < 0 || it.proteinMilligrams < 0 || it.loggedAt < 0 || (it.loggedDateEpochDay != null && it.loggedDateEpochDay !in 0..MAX_SUPPORTED_EPOCH_DAY) || (it.calorieTarget != null && it.calorieTarget !in 800..6000) }
             ?.let { fail("Invalid food entry ${it.id}.") }
         value.customFoods.firstOrNull { it.id <= 0 || it.name.isBlank() || it.calorieMilliUnitsPer100g !in 0..2_000_000 || it.proteinMilligramsPer100g !in 0..100_000 || it.createdAt < 0 }
             ?.let { fail("Invalid custom food ${it.id}.") }
@@ -177,16 +194,17 @@ class PortableBackupCodec {
                 ?.let { fail("Prepared meal references missing recipe: ${it.id}/${it.savedMealId}.") }
             val preparedIds = value.preparedMeals.mapTo(mutableSetOf()) { it.id }
             value.foodEntries.firstOrNull {
-                listOf(it.preparedMealId, it.preparedLogId, it.loggedDateEpochDay).count { field -> field != null } !in setOf(0, 3) ||
+                (it.preparedMealId == null) != (it.preparedLogId == null) ||
                     it.preparedMealId?.isBlank() == true || it.preparedLogId?.isBlank() == true ||
-                    (it.preparedMealId != null && it.preparedMealId !in preparedIds)
+                    (it.preparedMealId != null && (it.loggedDateEpochDay == null || it.preparedMealId !in preparedIds))
             }?.let { fail("Invalid prepared food lineage ${it.id}.") }
             value.foodEntries.filter { it.preparedLogId != null }.groupBy { it.preparedLogId }.values
                 .firstOrNull { rows ->
                     rows.map { it.preparedMealId }.distinct().size != 1 ||
                         rows.map { it.loggedAt }.distinct().size != 1 ||
                         rows.map { it.loggedDateEpochDay }.distinct().size != 1 ||
-                        rows.map { it.mealSlot }.distinct().size != 1
+                        rows.map { it.mealSlot }.distinct().size != 1 ||
+                        rows.map { it.calorieTarget }.distinct().size != 1
                 }
                 ?.let { fail("Inconsistent prepared food log group: ${it.first().preparedLogId}.") }
             val preparedLogsByPool = value.foodEntries
@@ -227,9 +245,9 @@ class PortableBackupCodec {
                 }
             }
         }
-        value.weightEntries.firstOrNull { it.id <= 0 || !it.kilograms.isFinite() || it.kilograms !in 25.0..400.0 || it.loggedAt < 0 }
+        value.weightEntries.firstOrNull { it.id <= 0 || !it.kilograms.isFinite() || it.kilograms !in 25.0..400.0 || it.loggedAt < 0 || (it.loggedDateEpochDay != null && it.loggedDateEpochDay !in 0..MAX_SUPPORTED_EPOCH_DAY) }
             ?.let { fail("Invalid weight entry ${it.id}.") }
-        if (value.settings.size != 1 || value.settings.single().id != 1 || value.settings.single().calorieGoal !in 800..6000 || value.settings.single().proteinGoal !in 20..400) {
+        if (value.settings.size != 1 || value.settings.single().id != 1 || value.settings.single().calorieGoal !in 800..6000 || value.settings.single().weekendCalorieGoal !in 800..6000 || value.settings.single().proteinGoal !in 20..400) {
             fail("Invalid settings record.")
         }
     }

@@ -23,6 +23,7 @@ import com.gymbro.local.domain.FoodPreset
 import com.gymbro.local.network.UsdaFood
 import kotlinx.coroutines.flow.Flow
 import kotlinx.serialization.Serializable
+import java.time.DayOfWeek
 import java.time.Instant
 import java.time.LocalDate
 import java.time.ZoneId
@@ -38,6 +39,7 @@ data class WorkoutSessionEntity(
     val dayName: String,
     val startedAt: Long,
     val completedAt: Long? = null,
+    val completedDateEpochDay: Long? = null,
 )
 
 @Entity(tableName = "set_completions", primaryKeys = ["sessionId", "exerciseId", "setIndex"])
@@ -87,9 +89,10 @@ data class FoodEntryEntity(
     val preparedMealId: String? = null,
     val preparedLogId: String? = null,
     val loggedDateEpochDay: Long? = null,
+    val calorieTarget: Int? = null,
 ) {
     companion object {
-        fun from(food: FoodPreset, grams: Int, loggedAt: Long, mealSlot: MealSlot = MealSlot.SNACK) = FoodEntryEntity(
+        fun from(food: FoodPreset, grams: Int, loggedAt: Long, mealSlot: MealSlot = MealSlot.SNACK, loggedDateEpochDay: Long? = null) = FoodEntryEntity(
             foodId = food.id,
             name = food.name,
             grams = grams,
@@ -97,8 +100,9 @@ data class FoodEntryEntity(
             proteinMilligrams = (food.proteinPer100g * grams * 10).roundToLong(),
             loggedAt = loggedAt,
             mealSlot = mealSlot,
+            loggedDateEpochDay = loggedDateEpochDay,
         )
-        fun from(food: UsdaFood, grams: Int, loggedAt: Long, mealSlot: MealSlot = MealSlot.SNACK) = FoodEntryEntity(
+        fun from(food: UsdaFood, grams: Int, loggedAt: Long, mealSlot: MealSlot = MealSlot.SNACK, loggedDateEpochDay: Long? = null) = FoodEntryEntity(
             foodId = "usda-${food.fdcId}",
             name = food.description,
             grams = grams,
@@ -106,12 +110,13 @@ data class FoodEntryEntity(
             proteinMilligrams = (food.proteinPer100g * grams * 10).roundToLong(),
             loggedAt = loggedAt,
             mealSlot = mealSlot,
+            loggedDateEpochDay = loggedDateEpochDay,
         )
-        fun from(food: CustomFoodEntity, grams: Int, mealSlot: MealSlot, loggedAt: Long) = FoodEntryEntity(
+        fun from(food: CustomFoodEntity, grams: Int, mealSlot: MealSlot, loggedAt: Long, loggedDateEpochDay: Long? = null) = FoodEntryEntity(
             foodId = "custom-${food.id}", name = food.name, grams = grams,
             calorieMilliUnits = (food.calorieMilliUnitsPer100g * grams + 50) / 100,
             proteinMilligrams = (food.proteinMilligramsPer100g * grams + 50) / 100,
-            loggedAt = loggedAt, mealSlot = mealSlot,
+            loggedAt = loggedAt, mealSlot = mealSlot, loggedDateEpochDay = loggedDateEpochDay,
         )
     }
 }
@@ -248,6 +253,7 @@ data class WeightEntryEntity(
     @PrimaryKey(autoGenerate = true) val id: Long = 0,
     val kilograms: Double,
     val loggedAt: Long,
+    val loggedDateEpochDay: Long? = null,
 )
 
 @Entity(tableName = "settings")
@@ -256,6 +262,8 @@ data class SettingsEntity(
     @PrimaryKey val id: Int = 1,
     val calorieGoal: Int = 2000,
     val proteinGoal: Int = 160,
+    @ColumnInfo(defaultValue = "2000")
+    val weekendCalorieGoal: Int = 2000,
 )
 
 data class PlanExerciseRow(
@@ -366,8 +374,8 @@ interface GymBroDao {
         if (activeSessionOnce() != null) return null
         return insertSession(value)
     }
-    @Query("UPDATE workout_sessions SET completedAt = :completedAt WHERE id = :id")
-    suspend fun completeSession(id: Long, completedAt: Long)
+    @Query("UPDATE workout_sessions SET completedAt = :completedAt, completedDateEpochDay = :completedDateEpochDay WHERE id = :id")
+    suspend fun completeSession(id: Long, completedAt: Long, completedDateEpochDay: Long)
 
     @Query("SELECT * FROM set_completions")
     fun completions(): Flow<List<SetCompletionEntity>>
@@ -385,6 +393,17 @@ interface GymBroDao {
     @Query("SELECT * FROM food_entries ORDER BY loggedAt DESC")
     fun foodEntries(): Flow<List<FoodEntryEntity>>
     @Insert suspend fun insertFood(value: FoodEntryEntity)
+    @Query("SELECT * FROM settings WHERE id=1") suspend fun settingsOnce(): SettingsEntity?
+    @Transaction suspend fun insertFoodWithTarget(value: FoodEntryEntity) {
+        val settings = settingsOnce() ?: SettingsEntity()
+        val date = value.loggedDate()
+        val target = if (date.dayOfWeek in setOf(DayOfWeek.SATURDAY, DayOfWeek.SUNDAY)) {
+            settings.weekendCalorieGoal
+        } else {
+            settings.calorieGoal
+        }
+        insertFood(value.copy(calorieTarget = value.calorieTarget ?: target))
+    }
     @Query("DELETE FROM food_entries WHERE id=:id AND preparedMealId IS NULL") suspend fun deleteFood(id: Long): Int
 
     @Query("SELECT * FROM custom_foods ORDER BY name") fun customFoods(): Flow<List<CustomFoodEntity>>
@@ -403,8 +422,8 @@ interface GymBroDao {
         insertSavedMealItems(items.map { it.copy(mealId = id) })
         return id
     }
-    @Transaction suspend fun logSavedMeal(meal: SavedMealWithItems, slot: MealSlot, loggedAt: Long) {
-        meal.toFoodEntries(slot, loggedAt).forEach { insertFood(it) }
+    @Transaction suspend fun logSavedMeal(meal: SavedMealWithItems, slot: MealSlot, loggedAt: Long, loggedDateEpochDay: Long) {
+        meal.toFoodEntries(slot, loggedAt, loggedDateEpochDay = loggedDateEpochDay).forEach { insertFoodWithTarget(it) }
     }
 
     @Query("SELECT * FROM prepared_meals ORDER BY weekStartEpochDay DESC, createdAt DESC")
@@ -433,7 +452,7 @@ interface GymBroDao {
         val changed = if (addExtra) addAndConsumeExtraPortion(id) else consumePreparedPortion(id)
         require(changed == 1) { if (addExtra) "Extra portion cannot be added." else "No prepared portions remain." }
         val logId = "prepared-log-${UUID.randomUUID()}"
-        recipe.toFoodEntries(slot, loggedAt, prepared.id, logId, loggedDateEpochDay).forEach { insertFood(it) }
+        recipe.toFoodEntries(slot, loggedAt, prepared.id, logId, loggedDateEpochDay).forEach { insertFoodWithTarget(it) }
     }
 
     @Transaction suspend fun archivePreparedMeal(id: String) {
@@ -451,7 +470,7 @@ interface GymBroDao {
 
 @Database(
     entities = [WorkoutSessionEntity::class, SetCompletionEntity::class, ExerciseCompletionEntity::class, FoodEntryEntity::class, CustomFoodEntity::class, SavedMealEntity::class, SavedMealItemEntity::class, PreparedMealEntity::class, WeightEntryEntity::class, SettingsEntity::class, ExerciseEntity::class, WorkoutPlanEntity::class, WorkoutPlanDayEntity::class, ExercisePrescriptionEntity::class],
-    version = 5,
+    version = 6,
     exportSchema = true,
 )
 @TypeConverters(GymBroConverters::class)
@@ -462,7 +481,7 @@ abstract class GymBroDatabase : RoomDatabase() {
         @Volatile private var instance: GymBroDatabase? = null
         fun get(context: Context): GymBroDatabase = instance ?: synchronized(this) {
             instance ?: Room.databaseBuilder(context.applicationContext, GymBroDatabase::class.java, "gymbro.db")
-                .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5)
+                .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6)
                 .build().also { instance = it }
         }
 
@@ -530,6 +549,17 @@ abstract class GymBroDatabase : RoomDatabase() {
                 db.execSQL("CREATE TABLE IF NOT EXISTS `prepared_meals` (`id` TEXT NOT NULL, `savedMealId` INTEGER NOT NULL, `weekStartEpochDay` INTEGER NOT NULL, `plannedPortions` INTEGER NOT NULL, `loggedPortions` INTEGER NOT NULL, `archived` INTEGER NOT NULL, `createdAt` INTEGER NOT NULL, PRIMARY KEY(`id`))")
                 db.execSQL("CREATE INDEX IF NOT EXISTS `index_prepared_meals_savedMealId` ON `prepared_meals` (`savedMealId`)")
                 db.execSQL("CREATE INDEX IF NOT EXISTS `index_prepared_meals_weekStartEpochDay_archived` ON `prepared_meals` (`weekStartEpochDay`, `archived`)")
+            }
+        }
+
+        val MIGRATION_5_6 = object : Migration(5, 6) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE `workout_sessions` ADD COLUMN `completedDateEpochDay` INTEGER")
+                db.execSQL("ALTER TABLE `weight_entries` ADD COLUMN `loggedDateEpochDay` INTEGER")
+                db.execSQL("ALTER TABLE `food_entries` ADD COLUMN `calorieTarget` INTEGER")
+                db.execSQL("ALTER TABLE `settings` ADD COLUMN `weekendCalorieGoal` INTEGER NOT NULL DEFAULT 2000")
+                db.execSQL("UPDATE `settings` SET `weekendCalorieGoal` = `calorieGoal`")
+                db.execSQL("UPDATE `food_entries` SET `calorieTarget` = COALESCE((SELECT `calorieGoal` FROM `settings` WHERE `id` = 1), 2000)")
             }
         }
     }

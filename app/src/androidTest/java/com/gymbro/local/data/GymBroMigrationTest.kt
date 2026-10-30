@@ -183,6 +183,52 @@ class GymBroMigrationTest {
         }
     }
 
+    @Test
+    fun migration5To6PreservesHistoryAndAddsHabitDateAndWeekendGoalFields() {
+        val version5Database = "$databaseName-v5"
+        helper.createDatabase(version5Database, 5).apply {
+            insert("workout_sessions", 0, ContentValues().apply {
+                put("id", 8L); put("dayId", "push"); put("dayName", "Push"); put("startedAt", 100L); put("completedAt", 200L)
+            })
+            insert("weight_entries", 0, ContentValues().apply {
+                put("id", 9L); put("kilograms", 80.0); put("loggedAt", 300L)
+            })
+            insert("settings", 0, ContentValues().apply {
+                put("id", 1); put("calorieGoal", 2400); put("proteinGoal", 180)
+            })
+            insert("food_entries", 0, foodEntry(id = 10L, mealSlot = MealSlot.LUNCH).apply {
+                putNull("preparedMealId"); putNull("preparedLogId"); put("loggedDateEpochDay", 20_388L)
+            })
+            close()
+        }
+
+        helper.runMigrationsAndValidate(version5Database, 6, true, GymBroDatabase.MIGRATION_5_6).use { db ->
+            db.query("SELECT completedAt, completedDateEpochDay FROM workout_sessions WHERE id=8").use { cursor ->
+                assertTrue(cursor.moveToFirst())
+                assertEquals(200L, cursor.getLong(0))
+                assertTrue(cursor.isNull(1))
+            }
+            db.query("SELECT kilograms, loggedDateEpochDay FROM weight_entries WHERE id=9").use { cursor ->
+                assertTrue(cursor.moveToFirst())
+                assertEquals(80.0, cursor.getDouble(0), 0.0)
+                assertTrue(cursor.isNull(1))
+            }
+            db.query("SELECT calorieGoal, weekendCalorieGoal FROM settings WHERE id=1").use { cursor ->
+                assertTrue(cursor.moveToFirst())
+                assertEquals(2400, cursor.getInt(0))
+                assertEquals(2400, cursor.getInt(1))
+            }
+            db.query("PRAGMA table_info(food_entries)").use { cursor ->
+                val columns = buildSet { while (cursor.moveToNext()) add(cursor.getString(cursor.getColumnIndexOrThrow("name"))) }
+                assertTrue(columns.contains("calorieTarget"))
+            }
+            db.query("SELECT calorieTarget FROM food_entries WHERE id=10").use { cursor ->
+                assertTrue(cursor.moveToFirst())
+                assertEquals(2400, cursor.getInt(0))
+            }
+        }
+    }
+
     private fun assertUniqueConstraint(db: androidx.sqlite.db.SupportSQLiteDatabase, sql: String) {
         try {
             db.execSQL(sql)

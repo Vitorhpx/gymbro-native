@@ -79,12 +79,65 @@ class PortableBackupTest {
         assertEquals("prep-stable", decoded.preparedMeals.single().id)
     }
 
+    @Test fun `current format rejects local habit dates outside supported calendar range`() {
+        val invalidEpochDay = LocalDate.of(10_000, 1, 1).toEpochDay()
+        val completedSession = validBackup().workoutSessions.single().copy(completedAt = 250, completedDateEpochDay = invalidEpochDay)
+        val invalidWorkout = validBackup().copy(workoutSessions = listOf(completedSession))
+        val invalidFood = validBackup().copy(foodEntries = listOf(validBackup().foodEntries.single().copy(loggedDateEpochDay = invalidEpochDay)))
+        val invalidWeight = validBackup().copy(weightEntries = listOf(validBackup().weightEntries.single().copy(loggedDateEpochDay = invalidEpochDay)))
+
+        assertEquals("Invalid workout session 7.", runCatching { codec.decodeAndValidate(codec.encode(invalidWorkout)) }.exceptionOrNull()?.message)
+        assertEquals("Invalid food entry 8.", runCatching { codec.decodeAndValidate(codec.encode(invalidFood)) }.exceptionOrNull()?.message)
+        assertEquals("Invalid weight entry 11.", runCatching { codec.decodeAndValidate(codec.encode(invalidWeight)) }.exceptionOrNull()?.message)
+    }
+
+    @Test fun `current format accepts explicit local dates for ordinary food logs`() {
+        val datedFood = validBackup().foodEntries.single().copy(loggedDateEpochDay = 20_388, calorieTarget = 2_100)
+        val backup = validBackup().copy(foodEntries = listOf(datedFood))
+
+        val decoded = codec.decodeAndValidate(codec.encode(backup))
+
+        assertEquals(20_388L, decoded.foodEntries.single().loggedDateEpochDay)
+        assertEquals(2_100, decoded.foodEntries.single().calorieTarget)
+        assertEquals(null, decoded.foodEntries.single().preparedMealId)
+    }
+
+    @Test fun `current format preserves explicit local habit dates`() {
+        val backup = validBackup().copy(
+            workoutSessions = listOf(validBackup().workoutSessions.single().copy(completedAt = 250, completedDateEpochDay = 20_388)),
+            weightEntries = listOf(validBackup().weightEntries.single().copy(loggedDateEpochDay = 20_389)),
+        )
+
+        val decoded = codec.decodeAndValidate(codec.encode(backup))
+
+        assertEquals(20_388L, decoded.workoutSessions.single().completedDateEpochDay)
+        assertEquals(20_389L, decoded.weightEntries.single().loggedDateEpochDay)
+    }
+
     @Test fun `format v2 remains compatible without prepared meal domain`() {
         val legacy = codec.encode(validBackup().copy(version = 2, preparedMeals = emptyList()))
             .replace("\"preparedMeals\":[],", "")
         val decoded = codec.decodeAndValidate(legacy)
         assertEquals(2, decoded.version)
         assertTrue(decoded.preparedMeals.isEmpty())
+    }
+
+    @Test fun `format v3 restores habit dates as unknown and preserves calorie intent for weekends`() {
+        val previous = validBackup().copy(
+            version = 3,
+            settings = listOf(SettingsEntity(calorieGoal = 2_400, proteinGoal = 180, weekendCalorieGoal = 2_100)),
+        )
+        val legacyJson = codec.encode(previous)
+            .replace(",\"completedDateEpochDay\":null", "")
+            .replace(",\"loggedDateEpochDay\":null", "")
+            .replace(",\"weekendCalorieGoal\":2100", "")
+
+        val decoded = codec.decodeAndValidate(legacyJson)
+
+        assertEquals(null, decoded.workoutSessions.single().completedDateEpochDay)
+        assertEquals(null, decoded.weightEntries.single().loggedDateEpochDay)
+        assertEquals(2_400, decoded.settings.single().weekendCalorieGoal)
+        assertEquals(2_400, decoded.foodEntries.single().calorieTarget)
     }
 
     @Test fun `format v2 ignores prepared meal fields from newer writers`() {
@@ -239,11 +292,11 @@ class PortableBackupTest {
     }
 
     @Test fun `unsupported version is rejected`() {
-        val json = codec.encode(validBackup()).replace("\"version\":3", "\"version\":4")
+        val json = codec.encode(validBackup()).replace("\"version\":4", "\"version\":5")
 
         val error = runCatching { codec.decodeAndValidate(json) }.exceptionOrNull()
 
-        assertEquals("Unsupported backup version: 4.", error?.message)
+        assertEquals("Unsupported backup version: 5.", error?.message)
     }
 
     @Test fun `duplicate primary identity is rejected`() {
@@ -348,7 +401,14 @@ class PortableBackupTest {
             exercisePrescriptions = emptyList(),
         )
 
-        assertEquals(legacy, codec.decodeAndValidate(codec.encode(legacy)))
+        val decoded = codec.decodeAndValidate(codec.encode(legacy))
+        assertEquals(
+            legacy.copy(
+                settings = legacy.settings.map { it.copy(weekendCalorieGoal = it.calorieGoal) },
+                foodEntries = legacy.foodEntries.map { it.copy(calorieTarget = legacy.settings.single().calorieGoal) },
+            ),
+            decoded,
+        )
     }
 
     @Test fun `v2 rejects modified seeded records and missing canonical seed identities`() {

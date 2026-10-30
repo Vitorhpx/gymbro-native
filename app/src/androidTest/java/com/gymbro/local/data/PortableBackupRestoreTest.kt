@@ -45,7 +45,7 @@ class PortableBackupRestoreTest {
         dao.restoreSavedMealItems(listOf(SavedMealItemEntity(10, 0, "rice", "Rice", 100, 130_000, 2_700)))
         dao.restorePreparedMeals(listOf(expectedPrepared))
         dao.restoreWeightEntries(listOf(WeightEntryEntity(11, 80.0, 160)))
-        dao.restoreSettings(listOf(SettingsEntity(1, 2100, 170)))
+        dao.restoreSettings(listOf(SettingsEntity(1, 2100, 170, 2300)))
         val (json, exportedCounts) = repository.exportJson()
 
         dao.clearSetCompletions(); dao.clearExerciseCompletions(); dao.clearPreparedMeals(); dao.clearSavedMealItems(); dao.clearSessions()

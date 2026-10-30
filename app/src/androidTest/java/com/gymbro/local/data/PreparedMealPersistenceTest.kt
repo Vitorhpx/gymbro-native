@@ -23,6 +23,19 @@ class PreparedMealPersistenceTest {
 
     @After fun tearDown() = database.close()
 
+    @Test fun foodLogsCaptureTheEffectiveDailyTargetForStableHistory() = runBlocking {
+        val dao = database.dao()
+        dao.saveSettings(SettingsEntity(calorieGoal = 2_000, proteinGoal = 160, weekendCalorieGoal = 2_300))
+        val monday = java.time.LocalDate.of(2026, 10, 26)
+        val saturday = monday.plusDays(5)
+        dao.insertFoodWithTarget(FoodEntryEntity(0, "weekday", "Weekday", 100, 1, 1, 1, loggedDateEpochDay = monday.toEpochDay()))
+        dao.insertFoodWithTarget(FoodEntryEntity(0, "weekend", "Weekend", 100, 1, 1, 2, loggedDateEpochDay = saturday.toEpochDay()))
+
+        val targets = dao.allFoodEntriesOnce().associate { it.foodId to it.calorieTarget }
+        assertEquals(2_000, targets.getValue("weekday"))
+        assertEquals(2_300, targets.getValue("weekend"))
+    }
+
     @Test fun loggingAndExtraLoggingAreAtomicAndPreservePreciseNutrition() = runBlocking {
         val dao = database.dao()
         val recipeId = dao.createSavedMeal(

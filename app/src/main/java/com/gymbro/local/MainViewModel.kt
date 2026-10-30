@@ -41,6 +41,8 @@ import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
+import java.time.Instant
+import java.time.ZoneId
 import java.util.UUID
 import kotlin.math.roundToLong
 
@@ -147,7 +149,10 @@ class MainViewModel(
             dao.completeExercise(ExerciseCompletionEntity(sessionId, exerciseId, (weight * 1000).roundToLong(), reps, System.currentTimeMillis()))
         } else dao.uncompleteExercise(sessionId, exerciseId)
     }
-    fun completeWorkout(id: Long) = viewModelScope.launch { dao.completeSession(id, System.currentTimeMillis()) }
+    fun completeWorkout(id: Long) = viewModelScope.launch {
+        val now = System.currentTimeMillis()
+        dao.completeSession(id, now, now.localEpochDay())
+    }
     fun createExercise(name: String, muscleGroup: String, category: String) = viewModelScope.launch {
         val clean = name.trim()
         if (clean.length !in 2..100) return@launch
@@ -163,22 +168,28 @@ class MainViewModel(
     }
 
     fun logFood(food: FoodPreset, grams: Int, slot: MealSlot = MealSlot.SNACK) = viewModelScope.launch {
-        if (grams in 1..5000) dao.insertFood(FoodEntryEntity.from(food, grams, System.currentTimeMillis(), slot))
+        val now = System.currentTimeMillis()
+        if (grams in 1..5000) dao.insertFoodWithTarget(FoodEntryEntity.from(food, grams, now, slot, now.localEpochDay()))
     }
     fun logFood(food: UsdaFood, grams: Int, slot: MealSlot = MealSlot.SNACK) = viewModelScope.launch {
-        if (grams in 1..5000) dao.insertFood(FoodEntryEntity.from(food, grams, System.currentTimeMillis(), slot))
+        val now = System.currentTimeMillis()
+        if (grams in 1..5000) dao.insertFoodWithTarget(FoodEntryEntity.from(food, grams, now, slot, now.localEpochDay()))
     }
     fun createCustomFood(name: String, caloriesPer100g: Double, proteinPer100g: Double) = viewModelScope.launch {
         if (name.trim().length !in 2..100 || caloriesPer100g !in 0.0..2000.0 || proteinPer100g !in 0.0..100.0) return@launch
         dao.insertCustomFood(CustomFoodEntity(name = name.trim(), calorieMilliUnitsPer100g = (caloriesPer100g * 1000).roundToLong(), proteinMilligramsPer100g = (proteinPer100g * 1000).roundToLong(), createdAt = System.currentTimeMillis()))
     }
     fun logFood(food: CustomFoodEntity, grams: Int, slot: MealSlot) = viewModelScope.launch {
-        if (grams in 1..5000) dao.insertFood(FoodEntryEntity.from(food, grams, slot, System.currentTimeMillis()))
+        val now = System.currentTimeMillis()
+        if (grams in 1..5000) dao.insertFoodWithTarget(FoodEntryEntity.from(food, grams, slot, now, now.localEpochDay()))
     }
     fun createSavedMeal(name: String, items: List<SavedMealItemEntity>) = viewModelScope.launch {
         if (name.trim().length in 2..100 && items.isNotEmpty()) dao.createSavedMeal(SavedMealEntity(name = name.trim(), createdAt = System.currentTimeMillis()), items)
     }
-    fun logSavedMeal(meal: SavedMealWithItems, slot: MealSlot) = viewModelScope.launch { dao.logSavedMeal(meal, slot, System.currentTimeMillis()) }
+    fun logSavedMeal(meal: SavedMealWithItems, slot: MealSlot) = viewModelScope.launch {
+        val now = System.currentTimeMillis()
+        dao.logSavedMeal(meal, slot, now, now.localEpochDay())
+    }
     fun createPreparedMeal(savedMealId: Long, weekStartEpochDay: Long, plannedPortions: Int) = viewModelScope.launch {
         val value = PreparedMealEntity(
             id = "prepared-${UUID.randomUUID()}", savedMealId = savedMealId,
@@ -214,11 +225,12 @@ class MainViewModel(
             return@launch
         }
         if (grams !in 1..5000) return@launch
-        dao.insertFood(FoodEntryEntity(
+        val now = System.currentTimeMillis()
+        dao.insertFoodWithTarget(FoodEntryEntity(
             foodId = "off-${product.barcode}", name = product.name, grams = grams,
             calorieMilliUnits = (product.caloriesPer100g * grams * 10).roundToLong(),
             proteinMilligrams = (product.proteinPer100g * grams * 10).roundToLong(),
-            loggedAt = System.currentTimeMillis(), mealSlot = slot,
+            loggedAt = now, mealSlot = slot, loggedDateEpochDay = now.localEpochDay(),
         ))
         _barcode.value = BarcodeUiState.Idle
     }
@@ -290,8 +302,17 @@ class MainViewModel(
     }
 
     fun deleteFood(id: Long) = viewModelScope.launch { dao.deleteFood(id) }
-    fun logWeight(kg: Double) = viewModelScope.launch { if (kg in 25.0..400.0) dao.insertWeight(WeightEntryEntity(kilograms = kg, loggedAt = System.currentTimeMillis())) }
-    fun saveGoals(calories: Int, protein: Int) = viewModelScope.launch { if (calories in 800..6000 && protein in 20..400) dao.saveSettings(SettingsEntity(calorieGoal = calories, proteinGoal = protein)) }
+    fun logWeight(kg: Double) = viewModelScope.launch {
+        val now = System.currentTimeMillis()
+        if (kg in 25.0..400.0) dao.insertWeight(
+            WeightEntryEntity(kilograms = kg, loggedAt = now, loggedDateEpochDay = now.localEpochDay()),
+        )
+    }
+    fun saveGoals(weekdayCalories: Int, weekendCalories: Int, protein: Int) = viewModelScope.launch {
+        if (weekdayCalories in 800..6000 && weekendCalories in 800..6000 && protein in 20..400) {
+            dao.saveSettings(SettingsEntity(calorieGoal = weekdayCalories, proteinGoal = protein, weekendCalorieGoal = weekendCalories))
+        }
+    }
 
     companion object {
         private const val PRIVATE_SETTINGS = "private_settings"
@@ -300,3 +321,6 @@ class MainViewModel(
         private const val MAX_BACKUP_BYTES = 20 * 1024 * 1024
     }
 }
+
+private fun Long.localEpochDay(): Long =
+    Instant.ofEpochMilli(this).atZone(ZoneId.systemDefault()).toLocalDate().toEpochDay()
