@@ -127,7 +127,12 @@ import com.gymbro.local.data.reachablePools
 import com.gymbro.local.domain.SeedData
 import com.gymbro.local.network.FoodSearchValidation
 import com.gymbro.local.ui.AdaptiveLayoutPolicy
+import com.gymbro.local.ui.EatSection
 import com.gymbro.local.ui.NavigationMode
+import com.gymbro.local.ui.TrainSection
+import com.gymbro.local.ui.TrainSurface
+import com.gymbro.local.ui.completedWorkoutHistory
+import com.gymbro.local.ui.trainSurface
 import kotlinx.coroutines.delay
 import java.io.File
 import java.time.DayOfWeek
@@ -255,7 +260,7 @@ private enum class Tab(val label: String, val icon: ImageVector) {
                         ) {
                     when (tab) {
                         Tab.Today -> TodayScreen(today, active, sessions, foods, weights, planExercises, todayCalories, settings?.proteinGoal ?: 160, vm, { tab = it }, { showSettings = true })
-                        Tab.Train -> TrainScreen(active, exerciseCompletions, exercises, planExercises, vm, { showSettings = true })
+                        Tab.Train -> TrainScreen(active, sessions, exerciseCompletions, exercises, planExercises, vm, { showSettings = true })
                         Tab.Eat -> EatScreen(today, foods, customFoods, savedMeals, preparedMeals, todayCalories, settings?.proteinGoal ?: 160, search, barcode, vm, scanBarcode, { showSettings = true })
                         Tab.Progress -> ProgressScreen(today, sessions, foods, weights, preparedMeals, weekdayCalories, weekendCalories, vm, { showSettings = true })
                     }
@@ -363,15 +368,23 @@ private fun displayDate(epoch: Long): String = Instant.ofEpochMilli(epoch).atZon
     }
 }
 
-@Composable private fun TrainScreen(active: WorkoutSessionEntity?, completions: List<ExerciseCompletionEntity>, exercises: List<ExerciseEntity>, planRows: List<PlanExerciseRow>, vm: MainViewModel, settings: () -> Unit) = Page(if (active == null) "Train" else active.dayName, if (active == null) "PPL · 3 days · 45 min" else "Session active · saved locally", settings) {
-    var view by rememberSaveable { mutableStateOf("Plan") }
+@Composable private fun TrainScreen(active: WorkoutSessionEntity?, sessions: List<WorkoutSessionEntity>, completions: List<ExerciseCompletionEntity>, exercises: List<ExerciseEntity>, planRows: List<PlanExerciseRow>, vm: MainViewModel, settings: () -> Unit) = Page(if (active == null) "Train" else active.dayName, if (active == null) "PPL · 3 days · 45 min" else "Session active · saved locally", settings) {
+    var section by rememberSaveable { mutableStateOf(TrainSection.PLANS) }
+    var browseSections by rememberSaveable(active?.id) { mutableStateOf(false) }
     var editing by remember { mutableStateOf<PlanExerciseRow?>(null) }
-    if (active == null) {
-        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            if (view == "Plan") Button({ view = "Plan" }, Modifier.weight(1f)) { Text("Plan") } else OutlinedButton({ view = "Plan" }, Modifier.weight(1f)) { Text("Plan") }
-            if (view == "Library") Button({ view = "Library" }, Modifier.weight(1f)) { Text("Exercise library") } else OutlinedButton({ view = "Library" }, Modifier.weight(1f)) { Text("Exercise library") }
+    if (trainSurface(active?.id, browseSections) == TrainSurface.SECTIONS) {
+        if (active != null) Panel("Workout in progress") {
+            Text(active.dayName, fontWeight = FontWeight.Bold)
+            Button({ browseSections = false }, Modifier.fillMaxWidth()) { Text("Resume workout") }
         }
-        if (view == "Plan") {
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            TrainSection.entries.forEach { item ->
+                if (section == item) Button({ section = item }, Modifier.weight(1f)) { Text(item.label) }
+                else OutlinedButton({ section = item }, Modifier.weight(1f)) { Text(item.label) }
+            }
+        }
+        when (section) {
+            TrainSection.PLANS -> {
             planRows.groupBy { it.dayId }.values.forEachIndexed { index, dayRows ->
                 val day = dayRows.first()
                 Panel("0${index + 1}  ${day.dayName.uppercase()}") {
@@ -384,18 +397,23 @@ private fun displayDate(epoch: Long): String = Instant.ofEpochMilli(epoch).atZon
                             OutlinedButton({ editing = row }) { Text("Edit") }
                         }
                     }
-                    Button({ vm.startWorkout(day.dayId, day.dayName) }, Modifier.fillMaxWidth()) { Text("Start ${day.dayName}") }
+                    Button({ vm.startWorkout(day.dayId, day.dayName) }, Modifier.fillMaxWidth(), enabled = active == null) { Text(if (active == null) "Start ${day.dayName}" else "Finish the active workout first") }
                 }
             }
-        } else ExerciseLibrary(exercises, vm)
+            }
+            TrainSection.HISTORY -> WorkoutHistory(sessions, completions, planRows)
+            TrainSection.LIBRARY -> ExerciseLibrary(exercises, vm)
+        }
     } else {
-        val dayRows = planRows.filter { it.dayId == active.dayId }.sortedBy { it.exercisePosition }
-        Text("Started ${displayDate(active.startedAt)}", color = MaterialTheme.colorScheme.onSurfaceVariant)
+        val activeSession = requireNotNull(active)
+        OutlinedButton({ browseSections = true }, Modifier.fillMaxWidth()) { Text("Browse plans, history & library") }
+        val dayRows = planRows.filter { it.dayId == activeSession.dayId }.sortedBy { it.exercisePosition }
+        Text("Started ${displayDate(activeSession.startedAt)}", color = MaterialTheme.colorScheme.onSurfaceVariant)
         dayRows.forEach { exercise ->
-            val done = completions.firstOrNull { it.sessionId == active.id && it.exerciseId == exercise.exerciseId }
-            val previous = completions.filter { it.exerciseId == exercise.exerciseId && it.sessionId != active.id }.maxWithOrNull(compareBy<ExerciseCompletionEntity> { it.weightMilliUnits }.thenBy { it.reps })
-            var weight by rememberSaveable(active.id, exercise.exerciseId) { mutableStateOf(done?.let { "%.1f".format(it.weightMilliUnits / 1000.0) } ?: previous?.let { "%.1f".format(it.weightMilliUnits / 1000.0) } ?: "") }
-            var reps by rememberSaveable(active.id, exercise.exerciseId) { mutableStateOf(done?.reps?.toString() ?: previous?.reps?.toString() ?: "") }
+            val done = completions.firstOrNull { it.sessionId == activeSession.id && it.exerciseId == exercise.exerciseId }
+            val previous = completions.filter { it.exerciseId == exercise.exerciseId && it.sessionId != activeSession.id }.maxWithOrNull(compareBy<ExerciseCompletionEntity> { it.weightMilliUnits }.thenBy { it.reps })
+            var weight by rememberSaveable(activeSession.id, exercise.exerciseId) { mutableStateOf(done?.let { "%.1f".format(it.weightMilliUnits / 1000.0) } ?: previous?.let { "%.1f".format(it.weightMilliUnits / 1000.0) } ?: "") }
+            var reps by rememberSaveable(activeSession.id, exercise.exerciseId) { mutableStateOf(done?.reps?.toString() ?: previous?.reps?.toString() ?: "") }
             Panel(exercise.exerciseName) {
                 Text("${exercise.sets} sets · ${exercise.minReps}–${exercise.maxReps} reps · ${exercise.restSeconds}s rest", color = MaterialTheme.colorScheme.secondary)
                 previous?.let { Text("Previous best: ${"%.1f".format(it.weightMilliUnits / 1000.0)} lb × ${it.reps}", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant) }
@@ -403,13 +421,39 @@ private fun displayDate(epoch: Long): String = Instant.ofEpochMilli(epoch).atZon
                     OutlinedTextField(weight, { weight = it.filter { c -> c.isDigit() || c == '.' } }, Modifier.weight(1f), label = { Text("Weight lb") }, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal), enabled = done == null, singleLine = true)
                     OutlinedTextField(reps, { reps = it.filter(Char::isDigit) }, Modifier.weight(1f), label = { Text("Reps") }, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number), enabled = done == null, singleLine = true)
                 }
-                if (done == null) Button({ vm.setExerciseCompleted(active.id, exercise.exerciseId, weight.toDoubleOrNull() ?: -1.0, reps.toIntOrNull() ?: 0, true) }, Modifier.fillMaxWidth(), enabled = weight.toDoubleOrNull()?.let { it in 0.0..5000.0 } == true && reps.toIntOrNull()?.let { it in 1..100 } == true) { Icon(Icons.Default.Check, null); Spacer(Modifier.width(8.dp)); Text("Complete exercise") }
-                else OutlinedButton({ vm.setExerciseCompleted(active.id, exercise.exerciseId, 0.0, 0, false) }, Modifier.fillMaxWidth()) { Text("✓ Completed · Edit") }
+                if (done == null) Button({ vm.setExerciseCompleted(activeSession.id, exercise.exerciseId, weight.toDoubleOrNull() ?: -1.0, reps.toIntOrNull() ?: 0, true) }, Modifier.fillMaxWidth(), enabled = weight.toDoubleOrNull()?.let { it in 0.0..5000.0 } == true && reps.toIntOrNull()?.let { it in 1..100 } == true) { Icon(Icons.Default.Check, null); Spacer(Modifier.width(8.dp)); Text("Complete exercise") }
+                else OutlinedButton({ vm.setExerciseCompleted(activeSession.id, exercise.exerciseId, 0.0, 0, false) }, Modifier.fillMaxWidth()) { Text("✓ Completed · Edit") }
             }
         }
-        Button({ vm.completeWorkout(active.id) }, Modifier.fillMaxWidth()) { Icon(Icons.Default.Check, null); Spacer(Modifier.width(8.dp)); Text("Complete workout") }
+        Button({ vm.completeWorkout(activeSession.id) }, Modifier.fillMaxWidth()) { Icon(Icons.Default.Check, null); Spacer(Modifier.width(8.dp)); Text("Complete workout") }
     }
     editing?.let { row -> PrescriptionEditor(row, vm) { editing = null } }
+}
+
+@Composable private fun WorkoutHistory(sessions: List<WorkoutSessionEntity>, completions: List<ExerciseCompletionEntity>, planRows: List<PlanExerciseRow>) {
+    val history = completedWorkoutHistory(sessions, completions, planRows)
+    if (history.isEmpty()) {
+        Panel("Workout history") {
+            Text("No workouts yet — start your first session!", fontWeight = FontWeight.Bold)
+            Text("Completed sessions will appear here with their exercise results.", color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+        return
+    }
+    history.forEach { item ->
+        val completedAt = requireNotNull(item.session.completedAt)
+        val minutes = Duration.ofMillis((completedAt - item.session.startedAt).coerceAtLeast(0)).toMinutes()
+        Panel(item.session.dayName) {
+            Text("${displayDate(completedAt)} · $minutes min · ${item.exercises.size} exercises", color = MaterialTheme.colorScheme.onSurfaceVariant)
+            if (item.exercises.isEmpty()) Text("No exercise results were recorded.", style = MaterialTheme.typography.bodySmall)
+            item.exercises.forEach { exercise ->
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                    Text(exercise.exerciseName, Modifier.weight(1f), fontWeight = FontWeight.SemiBold)
+                    Spacer(Modifier.width(12.dp))
+                    Text("${"%.1f".format(exercise.weightMilliUnits / 1000.0)} lb × ${exercise.reps}", color = MaterialTheme.colorScheme.secondary)
+                }
+            }
+        }
+    }
 }
 
 @Composable private fun ExerciseLibrary(exercises: List<ExerciseEntity>, vm: MainViewModel) {
@@ -440,13 +484,22 @@ private fun displayDate(epoch: Long): String = Instant.ofEpochMilli(epoch).atZon
 @Composable private fun EatScreen(today: LocalDate, entries: List<FoodEntryEntity>, customFoods: List<CustomFoodEntity>, savedMeals: List<SavedMealWithItems>, preparedMeals: List<PreparedMealEntity>, calorieGoal: Int, proteinGoal: Int, search: FoodSearchUiState, barcode: BarcodeUiState, vm: MainViewModel, scanBarcode: () -> Unit, settings: () -> Unit) = Page("Eat", "Fuel the work", settings) {
     val todayEntries = entries.loggedOn(today)
     val caloriesQualified = todayEntries.qualifiesCalorieTarget(calorieGoal)
+    var section by rememberSaveable { mutableStateOf(EatSection.DIET) }
     var query by rememberSaveable { mutableStateOf("") }; var grams by rememberSaveable { mutableStateOf("100") }; var slot by rememberSaveable { mutableStateOf(MealSlot.LUNCH) }
     var queryError by remember { mutableStateOf<String?>(null) }; var gramsError by remember { mutableStateOf<String?>(null) }
+    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        EatSection.entries.forEach { item ->
+            if (section == item) Button({ section = item }, Modifier.weight(1f)) { Text(item.label) }
+            else OutlinedButton({ section = item }, Modifier.weight(1f)) { Text(item.label) }
+        }
+    }
     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) { Metric("CALORIES", "${todayEntries.totalCalories()} / $calorieGoal", if (caloriesQualified) "On target" else if (todayEntries.totalCalories() > calorieGoal) "Above target" else "In progress", caloriesQualified, Modifier.weight(1f)); Metric("PROTEIN", "${todayEntries.totalProteinGrams()} / $proteinGoal g", if (todayEntries.totalProteinGrams() >= proteinGoal) "Complete" else "In progress", todayEntries.totalProteinGrams() >= proteinGoal, Modifier.weight(1f)) }
     Panel("Meal slot") {
         FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) { MealSlot.entries.forEach { item -> if (slot == item) Button({ slot = item }) { Text(item.name.lowercase().replaceFirstChar(Char::uppercase)) } else OutlinedButton({ slot = item }) { Text(item.name.lowercase().replaceFirstChar(Char::uppercase)) } } }
         Text("The selected slot applies to quick logs, search, custom foods, recipes, and barcode products.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
     }
+    when (section) {
+    EatSection.DIET -> {
     Panel("Scan packaged food") {
         Text("Scanning starts only when you tap the button. Google Code Scanner handles the camera without granting GymBro camera permission; the product code is then looked up over HTTPS at Open Food Facts.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         Button(scanBarcode, Modifier.fillMaxWidth(), enabled = barcode !is BarcodeUiState.Loading) { Text(if (barcode is BarcodeUiState.Loading) "Looking up product…" else "Scan barcode") }
@@ -473,8 +526,11 @@ private fun displayDate(epoch: Long): String = Instant.ofEpochMilli(epoch).atZon
         SeedData.foods.forEach { food -> FilledTonalButton({ vm.logFood(food, grams.toIntOrNull() ?: 0, slot) }, Modifier.fillMaxWidth()) { Text("${food.name} · ${food.caloriesPer100g.toInt()} kcal/100g") } }
     }
     CustomFoodsPanel(customFoods, grams, slot, vm)
-    PreparedMealsPanel(today, savedMeals, preparedMeals, slot, vm)
-    SavedMealsPanel(savedMeals, slot, vm)
+    }
+    EatSection.PLAN -> PreparedMealsPanel(today, savedMeals, preparedMeals, slot, vm)
+    EatSection.RECIPES -> SavedMealsPanel(savedMeals, slot, vm)
+    }
+    if (section == EatSection.DIET) {
     if (todayEntries.isNotEmpty()) Panel("Logged today") { MealSlot.entries.forEach { meal ->
         val mealEntries = todayEntries.filter { it.mealSlot == meal }; if (mealEntries.isNotEmpty()) { Text(meal.name.lowercase().replaceFirstChar(Char::uppercase), color = MaterialTheme.colorScheme.secondary, fontWeight = FontWeight.Bold); mealEntries.forEach { entry -> Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) { Column(Modifier.weight(1f)) { Text(entry.name, fontWeight = FontWeight.SemiBold); Text("${entry.grams} g · ${entry.displayCalories()} kcal · ${entry.displayProteinGrams()} g protein${if (entry.preparedMealId != null) " · prepared portion" else ""}", style = MaterialTheme.typography.bodySmall) }; if (entry.isRemovableFromUi) OutlinedButton({ vm.deleteFood(entry.id) }) { Text("Remove") } }; HorizontalDivider() } }
     } }
@@ -484,6 +540,7 @@ private fun displayDate(epoch: Long): String = Instant.ofEpochMilli(epoch).atZon
             Text(date.format(DateTimeFormatter.ofPattern("MMM d, yyyy")), fontWeight = FontWeight.Bold)
             Text("${rows.size} item${if (rows.size == 1) "" else "s"} · ${rows.totalCalories()} kcal · ${rows.totalProteinGrams()} g protein", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
+    }
     }
 }
 
