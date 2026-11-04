@@ -229,6 +229,30 @@ class GymBroMigrationTest {
         }
     }
 
+    @Test
+    fun migration6To7PreservesWorkoutsAndAddsPersistentExerciseSwaps() {
+        val version6Database = "$databaseName-v6"
+        helper.createDatabase(version6Database, 6).apply {
+            insert("workout_sessions", 0, ContentValues().apply {
+                put("id", 8L); put("dayId", "push"); put("dayName", "Push"); put("startedAt", 100L); putNull("completedAt"); putNull("completedDateEpochDay")
+            })
+            close()
+        }
+
+        helper.runMigrationsAndValidate(version6Database, 7, true, GymBroDatabase.MIGRATION_6_7).use { db ->
+            db.query("SELECT dayId FROM workout_sessions WHERE id=8").use { cursor ->
+                assertTrue(cursor.moveToFirst())
+                assertEquals("push", cursor.getString(0))
+            }
+            db.execSQL("INSERT INTO session_exercise_swaps VALUES (8,'chest-press','pec-deck')")
+            db.query("SELECT swapExerciseId FROM session_exercise_swaps WHERE sessionId=8 AND originalExerciseId='chest-press'").use { cursor ->
+                assertTrue(cursor.moveToFirst())
+                assertEquals("pec-deck", cursor.getString(0))
+            }
+            assertUniqueConstraint(db, "INSERT INTO session_exercise_swaps VALUES (8,'chest-press','incline-press')")
+        }
+    }
+
     private fun assertUniqueConstraint(db: androidx.sqlite.db.SupportSQLiteDatabase, sql: String) {
         try {
             db.execSQL(sql)

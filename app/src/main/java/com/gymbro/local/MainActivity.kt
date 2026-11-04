@@ -107,6 +107,8 @@ import com.gymbro.local.data.ExerciseCompletionEntity
 import com.gymbro.local.data.ExerciseEntity
 import com.gymbro.local.data.PlanExerciseRow
 import com.gymbro.local.data.PreparedMealEntity
+import com.gymbro.local.data.SessionExerciseSwapEntity
+import com.gymbro.local.data.WorkoutPlanSeedData
 
 import com.gymbro.local.data.MealSlot
 import com.gymbro.local.data.SavedMealItemEntity
@@ -119,6 +121,7 @@ import com.gymbro.local.data.displayProteinGrams
 import com.gymbro.local.data.datedHistory
 import com.gymbro.local.data.loggedOn
 import com.gymbro.local.data.isRemovableFromUi
+import com.gymbro.local.data.isSwapExerciseAvailable
 import com.gymbro.local.data.totalCalories
 import com.gymbro.local.data.totalProteinGrams
 import com.gymbro.local.data.planningCompleteFor
@@ -131,6 +134,7 @@ import com.gymbro.local.ui.EatSection
 import com.gymbro.local.ui.NavigationMode
 import com.gymbro.local.ui.TrainSection
 import com.gymbro.local.ui.TrainSurface
+import com.gymbro.local.ui.activeExerciseId
 import com.gymbro.local.ui.completedWorkoutHistory
 import com.gymbro.local.ui.trainSurface
 import kotlinx.coroutines.delay
@@ -191,6 +195,7 @@ private enum class Tab(val label: String, val icon: ImageVector) {
     var showSettings by rememberSaveable { mutableStateOf(false) }
     val active by vm.active.collectAsState(); val sessions by vm.sessions.collectAsState()
     val exerciseCompletions by vm.exerciseCompletions.collectAsState(); val foods by vm.foodEntries.collectAsState()
+    val sessionExerciseSwaps by vm.sessionExerciseSwaps.collectAsState()
     val customFoods by vm.customFoods.collectAsState(); val savedMeals by vm.savedMeals.collectAsState()
     val preparedMeals by vm.preparedMeals.collectAsState()
     val weights by vm.weights.collectAsState(); val settings by vm.settings.collectAsState()
@@ -260,7 +265,7 @@ private enum class Tab(val label: String, val icon: ImageVector) {
                         ) {
                     when (tab) {
                         Tab.Today -> TodayScreen(today, active, sessions, foods, weights, planExercises, todayCalories, settings?.proteinGoal ?: 160, vm, { tab = it }, { showSettings = true })
-                        Tab.Train -> TrainScreen(active, sessions, exerciseCompletions, exercises, planExercises, vm, { showSettings = true })
+                        Tab.Train -> TrainScreen(active, sessions, exerciseCompletions, sessionExerciseSwaps, exercises, planExercises, vm, { showSettings = true })
                         Tab.Eat -> EatScreen(today, foods, customFoods, savedMeals, preparedMeals, todayCalories, settings?.proteinGoal ?: 160, search, barcode, vm, scanBarcode, { showSettings = true })
                         Tab.Progress -> ProgressScreen(today, sessions, foods, weights, preparedMeals, weekdayCalories, weekendCalories, vm, { showSettings = true })
                     }
@@ -368,10 +373,11 @@ private fun displayDate(epoch: Long): String = Instant.ofEpochMilli(epoch).atZon
     }
 }
 
-@Composable private fun TrainScreen(active: WorkoutSessionEntity?, sessions: List<WorkoutSessionEntity>, completions: List<ExerciseCompletionEntity>, exercises: List<ExerciseEntity>, planRows: List<PlanExerciseRow>, vm: MainViewModel, settings: () -> Unit) = Page(if (active == null) "Train" else active.dayName, if (active == null) "PPL · 3 days · 45 min" else "Session active · saved locally", settings) {
+@Composable private fun TrainScreen(active: WorkoutSessionEntity?, sessions: List<WorkoutSessionEntity>, completions: List<ExerciseCompletionEntity>, swaps: List<SessionExerciseSwapEntity>, exercises: List<ExerciseEntity>, planRows: List<PlanExerciseRow>, vm: MainViewModel, settings: () -> Unit) = Page(if (active == null) "Train" else active.dayName, if (active == null) "PPL · 3 days · 45 min" else "Session active · saved locally", settings) {
     var section by rememberSaveable { mutableStateOf(TrainSection.PLANS) }
     var browseSections by rememberSaveable(active?.id) { mutableStateOf(false) }
     var editing by remember { mutableStateOf<PlanExerciseRow?>(null) }
+    var swapping by remember { mutableStateOf<PlanExerciseRow?>(null) }
     if (trainSurface(active?.id, browseSections) == TrainSurface.SECTIONS) {
         if (active != null) Panel("Workout in progress") {
             Text(active.dayName, fontWeight = FontWeight.Bold)
@@ -401,22 +407,32 @@ private fun displayDate(epoch: Long): String = Instant.ofEpochMilli(epoch).atZon
                 }
             }
             }
-            TrainSection.HISTORY -> WorkoutHistory(sessions, completions, planRows)
+            TrainSection.HISTORY -> WorkoutHistory(sessions, completions, planRows, exercises, swaps)
             TrainSection.LIBRARY -> ExerciseLibrary(exercises, vm)
         }
     } else {
         val activeSession = requireNotNull(active)
         OutlinedButton({ browseSections = true }, Modifier.fillMaxWidth()) { Text("Browse plans, history & library") }
         val dayRows = planRows.filter { it.dayId == activeSession.dayId }.sortedBy { it.exercisePosition }
+        val exercisesById = exercises.associateBy { it.id }
         Text("Started ${displayDate(activeSession.startedAt)}", color = MaterialTheme.colorScheme.onSurfaceVariant)
         dayRows.forEach { exercise ->
-            val done = completions.firstOrNull { it.sessionId == activeSession.id && it.exerciseId == exercise.exerciseId }
-            val previous = completions.filter { it.exerciseId == exercise.exerciseId && it.sessionId != activeSession.id }.maxWithOrNull(compareBy<ExerciseCompletionEntity> { it.weightMilliUnits }.thenBy { it.reps })
-            var weight by rememberSaveable(activeSession.id, exercise.exerciseId) { mutableStateOf(done?.let { "%.1f".format(it.weightMilliUnits / 1000.0) } ?: previous?.let { "%.1f".format(it.weightMilliUnits / 1000.0) } ?: "") }
-            var reps by rememberSaveable(activeSession.id, exercise.exerciseId) { mutableStateOf(done?.reps?.toString() ?: previous?.reps?.toString() ?: "") }
-            Panel(exercise.exerciseName) {
+            val actualExerciseId = activeExerciseId(activeSession.id, exercise.exerciseId, swaps)
+            val actualExercise = exercisesById[actualExerciseId]
+            val actualExerciseName = actualExercise?.name ?: exercise.exerciseName
+            val done = completions.firstOrNull { it.sessionId == activeSession.id && it.exerciseId == actualExerciseId }
+            val previous = completions.filter { it.exerciseId == actualExerciseId && it.sessionId != activeSession.id }.maxWithOrNull(compareBy<ExerciseCompletionEntity> { it.weightMilliUnits }.thenBy { it.reps })
+            var weight by rememberSaveable(activeSession.id, exercise.exerciseId, actualExerciseId) { mutableStateOf(done?.let { "%.1f".format(it.weightMilliUnits / 1000.0) } ?: previous?.let { "%.1f".format(it.weightMilliUnits / 1000.0) } ?: "") }
+            var reps by rememberSaveable(activeSession.id, exercise.exerciseId, actualExerciseId) { mutableStateOf(done?.reps?.toString() ?: previous?.reps?.toString() ?: "") }
+            Panel(actualExerciseName) {
+                if (actualExerciseId != exercise.exerciseId) {
+                    Text("Swapped from ${exercise.exerciseName}", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.primary)
+                }
                 Text("${exercise.sets} sets · ${exercise.minReps}–${exercise.maxReps} reps · ${exercise.restSeconds}s rest", color = MaterialTheme.colorScheme.secondary)
                 previous?.let { Text("Previous best: ${"%.1f".format(it.weightMilliUnits / 1000.0)} lb × ${it.reps}", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant) }
+                OutlinedButton({ swapping = exercise }, Modifier.fillMaxWidth(), enabled = done == null) {
+                    Text(if (actualExerciseId == exercise.exerciseId) "Swap exercise" else "Change swap")
+                }
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     OutlinedTextField(weight, { weight = it.filter { c -> c.isDigit() || c == '.' } }, Modifier.weight(1f), label = { Text("Weight lb") }, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal), enabled = done == null, singleLine = true)
                     OutlinedTextField(reps, { reps = it.filter(Char::isDigit) }, Modifier.weight(1f), label = { Text("Reps") }, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number), enabled = done == null, singleLine = true)
@@ -428,10 +444,45 @@ private fun displayDate(epoch: Long): String = Instant.ofEpochMilli(epoch).atZon
         Button({ vm.completeWorkout(activeSession.id) }, Modifier.fillMaxWidth()) { Icon(Icons.Default.Check, null); Spacer(Modifier.width(8.dp)); Text("Complete workout") }
     }
     editing?.let { row -> PrescriptionEditor(row, vm) { editing = null } }
+    swapping?.let { row ->
+        val activeDayExerciseIds = active?.let { session ->
+            planRows.filter { it.dayId == session.dayId }.sortedBy { it.exercisePosition }.map { it.exerciseId }
+        }.orEmpty()
+        val swapsByOriginal = active?.let { session ->
+            swaps.filter { it.sessionId == session.id }.associate { it.originalExerciseId to it.swapExerciseId }
+        }.orEmpty()
+        val options = WorkoutPlanSeedData.ppl45v2.swapOptions[row.exerciseId].orEmpty()
+            .filter { isSwapExerciseAvailable(row.exerciseId, it, activeDayExerciseIds, swapsByOriginal) }
+            .mapNotNull { id -> exercises.firstOrNull { it.id == id } }
+        AlertDialog(
+            onDismissRequest = { swapping = null },
+            title = { Text("Swap ${row.exerciseName}") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    if (options.isEmpty()) Text("No swaps saved for this exercise yet.")
+                    options.forEach { option ->
+                        OutlinedButton(
+                            onClick = { active?.let { vm.swapExercise(it.id, row.exerciseId, option.id) }; swapping = null },
+                            modifier = Modifier.fillMaxWidth(),
+                        ) {
+                            Column(Modifier.fillMaxWidth()) {
+                                Text(option.name, fontWeight = FontWeight.Bold)
+                                Text(option.muscleGroup, style = MaterialTheme.typography.bodySmall)
+                            }
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                OutlinedButton({ active?.let { vm.useOriginalExercise(it.id, row.exerciseId) }; swapping = null }) { Text("Log original instead") }
+            },
+            dismissButton = { OutlinedButton({ swapping = null }) { Text("Cancel") } },
+        )
+    }
 }
 
-@Composable private fun WorkoutHistory(sessions: List<WorkoutSessionEntity>, completions: List<ExerciseCompletionEntity>, planRows: List<PlanExerciseRow>) {
-    val history = completedWorkoutHistory(sessions, completions, planRows)
+@Composable private fun WorkoutHistory(sessions: List<WorkoutSessionEntity>, completions: List<ExerciseCompletionEntity>, planRows: List<PlanExerciseRow>, exercises: List<ExerciseEntity>, swaps: List<SessionExerciseSwapEntity>) {
+    val history = completedWorkoutHistory(sessions, completions, planRows, exercises, swaps)
     if (history.isEmpty()) {
         Panel("Workout history") {
             Text("No workouts yet — start your first session!", fontWeight = FontWeight.Bold)

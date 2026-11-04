@@ -6,6 +6,7 @@ data class BackupCounts(
     val workoutSessions: Int,
     val setCompletions: Int,
     val exerciseCompletions: Int,
+    val sessionExerciseSwaps: Int,
     val foodEntries: Int,
     val customFoods: Int,
     val savedMeals: Int,
@@ -18,7 +19,7 @@ data class BackupCounts(
     val workoutPlanDays: Int,
     val exercisePrescriptions: Int,
 ) {
-    val total: Int get() = workoutSessions + setCompletions + exerciseCompletions + foodEntries + customFoods + savedMeals + savedMealItems + preparedMeals + weightEntries + settings + exercises + workoutPlans + workoutPlanDays + exercisePrescriptions
+    val total: Int get() = workoutSessions + setCompletions + exerciseCompletions + sessionExerciseSwaps + foodEntries + customFoods + savedMeals + savedMealItems + preparedMeals + weightEntries + settings + exercises + workoutPlans + workoutPlanDays + exercisePrescriptions
 }
 
 class PortableBackupRepository(
@@ -46,12 +47,13 @@ class PortableBackupRepository(
         ) else decoded
         val expected = codec.decodeAndValidate(codec.encode(upgraded.copy(version = PortableBackup.CURRENT_VERSION)))
         return database.withTransaction {
-            dao.clearSetCompletions(); dao.clearExerciseCompletions(); dao.clearPreparedMeals(); dao.clearSavedMealItems()
+            dao.clearSetCompletions(); dao.clearExerciseCompletions(); dao.clearSessionExerciseSwaps(); dao.clearPreparedMeals(); dao.clearSavedMealItems()
             dao.clearExercisePrescriptions(); dao.clearWorkoutPlanDays(); dao.clearWorkoutPlans(); dao.clearExercises()
             dao.clearSessions(); dao.clearFoodEntries(); dao.clearCustomFoods(); dao.clearSavedMeals(); dao.clearWeightEntries(); dao.clearSettings()
             dao.restoreSessions(expected.workoutSessions)
             dao.restoreSetCompletions(expected.setCompletions)
             dao.restoreExerciseCompletions(expected.exerciseCompletions)
+            dao.restoreSessionExerciseSwaps(expected.sessionExerciseSwaps)
             dao.restoreFoodEntries(expected.foodEntries)
             dao.restoreCustomFoods(expected.customFoods)
             dao.restoreSavedMeals(expected.savedMeals)
@@ -72,7 +74,8 @@ class PortableBackupRepository(
     private suspend fun snapshot() = PortableBackup(
         version = PortableBackup.CURRENT_VERSION,
         workoutSessions = dao.allSessionsOnce(), setCompletions = dao.allSetCompletionsOnce(),
-        exerciseCompletions = dao.allExerciseCompletionsOnce(), foodEntries = dao.allFoodEntriesOnce(),
+        exerciseCompletions = dao.allExerciseCompletionsOnce(), sessionExerciseSwaps = dao.allSessionExerciseSwapsOnce(),
+        foodEntries = dao.allFoodEntriesOnce(),
         customFoods = dao.allCustomFoodsOnce(), savedMeals = dao.allSavedMealsOnce(),
         savedMealItems = dao.allSavedMealItemsOnce(), preparedMeals = dao.allPreparedMealsOnce(), weightEntries = dao.allWeightEntriesOnce(),
         settings = dao.allSettingsOnce(),
@@ -81,7 +84,7 @@ class PortableBackupRepository(
     )
 
     private fun PortableBackup.counts() = BackupCounts(
-        workoutSessions.size, setCompletions.size, exerciseCompletions.size, foodEntries.size,
+        workoutSessions.size, setCompletions.size, exerciseCompletions.size, sessionExerciseSwaps.size, foodEntries.size,
         customFoods.size, savedMeals.size, savedMealItems.size, preparedMeals.size, weightEntries.size, settings.size,
         exercises.size, workoutPlans.size, workoutPlanDays.size, exercisePrescriptions.size,
     )

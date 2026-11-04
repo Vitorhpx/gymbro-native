@@ -79,6 +79,45 @@ class PortableBackupTest {
         assertEquals("prep-stable", decoded.preparedMeals.single().id)
     }
 
+    @Test fun `current format preserves a session exercise swap and its actual completion`() {
+        val expected = validBackup().copy(
+            setCompletions = emptyList(),
+            exerciseCompletions = listOf(ExerciseCompletionEntity(7, "pec-deck", 100_000, 8, 200)),
+            sessionExerciseSwaps = listOf(SessionExerciseSwapEntity(7, "chest-press", "pec-deck")),
+        )
+
+        val decoded = codec.decodeAndValidate(codec.encode(expected))
+
+        assertEquals(expected, decoded)
+    }
+
+    @Test fun `current format rejects two workout slots using the same active exercise`() {
+        val invalid = validBackup().copy(
+            workoutSessions = listOf(WorkoutSessionEntity(7, "legs", "Legs", 100, null)),
+            setCompletions = emptyList(),
+            exerciseCompletions = emptyList(),
+            sessionExerciseSwaps = listOf(
+                SessionExerciseSwapEntity(7, "smith-squat", "leg-press"),
+                SessionExerciseSwapEntity(7, "hip-thrust", "leg-press"),
+            ),
+        )
+
+        assertEquals("Workout session 7 reuses active exercise leg-press.", validationMessage(invalid))
+    }
+
+    @Test fun `current format rejects a swap outside the seeded alternatives`() {
+        val invalid = validBackup().copy(
+            setCompletions = emptyList(),
+            exerciseCompletions = emptyList(),
+            sessionExerciseSwaps = listOf(SessionExerciseSwapEntity(7, "chest-press", "lat-pulldown")),
+        )
+
+        assertEquals(
+            "Invalid session exercise swap 7/chest-press/lat-pulldown.",
+            validationMessage(invalid),
+        )
+    }
+
     @Test fun `current format rejects local habit dates outside supported calendar range`() {
         val invalidEpochDay = LocalDate.of(10_000, 1, 1).toEpochDay()
         val completedSession = validBackup().workoutSessions.single().copy(completedAt = 250, completedDateEpochDay = invalidEpochDay)
@@ -292,11 +331,11 @@ class PortableBackupTest {
     }
 
     @Test fun `unsupported version is rejected`() {
-        val json = codec.encode(validBackup()).replace("\"version\":4", "\"version\":5")
+        val json = codec.encode(validBackup()).replace("\"version\":5", "\"version\":6")
 
         val error = runCatching { codec.decodeAndValidate(json) }.exceptionOrNull()
 
-        assertEquals("Unsupported backup version: 5.", error?.message)
+        assertEquals("Unsupported backup version: 6.", error?.message)
     }
 
     @Test fun `duplicate primary identity is rejected`() {

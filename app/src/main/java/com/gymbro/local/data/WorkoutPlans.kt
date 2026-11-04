@@ -68,10 +68,22 @@ data class WorkoutPlanSeed(
     val plan: WorkoutPlanEntity,
     val days: List<WorkoutPlanDayEntity>,
     val prescriptions: List<ExercisePrescriptionEntity>,
+    val swapOptions: Map<String, List<String>>,
 )
 
 fun <T> refreshSeedRecord(existing: T?, previousCanonical: T, currentCanonical: T): T =
     if (existing == null || existing == previousCanonical) currentCanonical else existing
+
+fun isSwapExerciseAvailable(
+    originalExerciseId: String,
+    candidateExerciseId: String,
+    plannedExerciseIds: List<String>,
+    swapsByOriginalExerciseId: Map<String, String>,
+): Boolean = plannedExerciseIds
+    .asSequence()
+    .filterNot { it == originalExerciseId }
+    .map { swapsByOriginalExerciseId[it] ?: it }
+    .none { it == candidateExerciseId }
 
 object WorkoutPlanSeedData {
     private fun exercise(id: String, name: String, muscle: String, category: String) =
@@ -137,6 +149,23 @@ object WorkoutPlanSeedData {
             prescription("legs", "hip-thrust", 2, 3, 10, 15, 90),
             prescription("legs", "hip-abductor", 3, 2, 12, 20, 60),
             prescription("legs", "calf-raise", 4, 3, 12, 20, 60),
+        ),
+        swapOptions = mapOf(
+            "chest-press" to listOf("pec-deck"),
+            "incline-press" to listOf("smith-incline-bench-press"),
+            "shoulder-press" to listOf("shoulder-press-machine"),
+            "lateral-raise" to listOf("cable-lateral-raise"),
+            "triceps-pushdown" to listOf("triceps-machine"),
+            "lat-pulldown" to listOf("cable-lat-pulldown"),
+            "seated-row" to listOf("cable-seated-row"),
+            "rear-delt" to listOf("face-pull-to-chest"),
+            "cable-curl" to listOf("db-biceps-curl"),
+            "hammer-curl" to listOf("rope-hammer-curl"),
+            "smith-squat" to listOf("leg-press"),
+            "smith-rdl" to listOf("leg-curl-machine"),
+            "hip-thrust" to listOf("leg-press"),
+            "hip-abductor" to listOf("leg-extension"),
+            "calf-raise" to listOf("leg-press-calf-raise"),
         ),
     )
 }

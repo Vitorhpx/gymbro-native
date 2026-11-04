@@ -1,7 +1,9 @@
 package com.gymbro.local.ui
 
 import com.gymbro.local.data.ExerciseCompletionEntity
+import com.gymbro.local.data.ExerciseEntity
 import com.gymbro.local.data.PlanExerciseRow
+import com.gymbro.local.data.SessionExerciseSwapEntity
 import com.gymbro.local.data.WorkoutSessionEntity
 
 enum class TrainSection(val label: String) {
@@ -14,6 +16,14 @@ enum class TrainSurface { ACTIVE_WORKOUT, SECTIONS }
 
 fun trainSurface(activeSessionId: Long?, browseSections: Boolean): TrainSurface =
     if (activeSessionId != null && !browseSections) TrainSurface.ACTIVE_WORKOUT else TrainSurface.SECTIONS
+
+fun activeExerciseId(
+    sessionId: Long,
+    originalExerciseId: String,
+    swaps: List<SessionExerciseSwapEntity>,
+): String = swaps.firstOrNull {
+    it.sessionId == sessionId && it.originalExerciseId == originalExerciseId
+}?.swapExerciseId ?: originalExerciseId
 
 enum class EatSection(val label: String) {
     DIET("Diet"),
@@ -37,9 +47,18 @@ fun completedWorkoutHistory(
     sessions: List<WorkoutSessionEntity>,
     completions: List<ExerciseCompletionEntity>,
     planRows: List<PlanExerciseRow>,
+    exercises: List<ExerciseEntity> = emptyList(),
+    swaps: List<SessionExerciseSwapEntity> = emptyList(),
 ): List<WorkoutHistoryItem> {
-    val exerciseNames = planRows.associate { it.exerciseId to it.exerciseName }
+    val exerciseNames = planRows.associate { it.exerciseId to it.exerciseName } +
+        exercises.associate { it.id to it.name }
     val positionByDayAndExercise = planRows.associate { (it.dayId to it.exerciseId) to it.exercisePosition }
+    val sessionsById = sessions.associateBy { it.id }
+    val swappedPositionBySessionAndExercise = swaps.mapNotNull { swap ->
+        val dayId = sessionsById[swap.sessionId]?.dayId ?: return@mapNotNull null
+        val position = positionByDayAndExercise[dayId to swap.originalExerciseId] ?: return@mapNotNull null
+        (swap.sessionId to swap.swapExerciseId) to position
+    }.toMap()
     val completionsBySession = completions.groupBy { it.sessionId }
 
     return sessions.asSequence()
@@ -47,7 +66,11 @@ fun completedWorkoutHistory(
         .sortedByDescending { it.completedAt }
         .map { session ->
             val exercises = completionsBySession[session.id].orEmpty()
-                .sortedBy { positionByDayAndExercise[session.dayId to it.exerciseId] ?: Int.MAX_VALUE }
+                .sortedBy {
+                    swappedPositionBySessionAndExercise[session.id to it.exerciseId]
+                        ?: positionByDayAndExercise[session.dayId to it.exerciseId]
+                        ?: Int.MAX_VALUE
+                }
                 .map { completion ->
                     WorkoutHistoryExercise(
                         exerciseId = completion.exerciseId,

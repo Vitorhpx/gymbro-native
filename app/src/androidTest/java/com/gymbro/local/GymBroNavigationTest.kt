@@ -3,8 +3,10 @@ package com.gymbro.local
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.onNodeWithContentDescription
+import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performScrollTo
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
 import org.junit.Assert.assertTrue
@@ -42,5 +44,18 @@ class GymBroNavigationTest {
             .top
 
         assertTrue("Header must start below the status bar", headerTop >= statusBarHeight)
+    }
+
+    @Test fun activeWorkoutCanSwapAnExerciseAndShowsItsOrigin() {
+        compose.onNodeWithContentDescription("Train").performClick()
+        compose.onNodeWithText("Start Push").performScrollTo().performClick()
+        compose.waitUntil(5_000) { compose.onAllNodesWithText("Swap exercise").fetchSemanticsNodes().isNotEmpty() }
+
+        compose.onAllNodesWithText("Swap exercise")[0].performScrollTo().performClick()
+        compose.onNodeWithText("Swap Chest Press Machine").assertIsDisplayed()
+        compose.onNodeWithText("Pec Deck").performClick()
+
+        compose.waitUntil(5_000) { compose.onAllNodesWithText("Swapped from Chest Press Machine").fetchSemanticsNodes().isNotEmpty() }
+        compose.onNodeWithText("Swapped from Chest Press Machine").assertIsDisplayed()
     }
 }

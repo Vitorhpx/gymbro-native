@@ -6,7 +6,6 @@ import android.net.Uri
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.gymbro.local.data.CustomFoodEntity
-import com.gymbro.local.data.ExerciseCompletionEntity
 import com.gymbro.local.data.ExerciseEntity
 import com.gymbro.local.data.FoodEntryEntity
 import com.gymbro.local.data.GymBroDatabase
@@ -114,6 +113,7 @@ class MainViewModel(
     val active = dao.activeSession().stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), null)
     val sessions = dao.sessions().stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
     val exerciseCompletions = dao.exerciseCompletions().stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
+    val sessionExerciseSwaps = dao.sessionExerciseSwaps().stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
     val foodEntries = dao.foodEntries().stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
     val customFoods = dao.customFoods().stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
     val savedMeals = dao.savedMeals().stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
@@ -149,11 +149,17 @@ class MainViewModel(
     fun startWorkout(dayId: String, dayName: String) = viewModelScope.launch {
         dao.startSessionIfNone(WorkoutSessionEntity(dayId = dayId, dayName = dayName, startedAt = System.currentTimeMillis()))
     }
-    fun setExerciseCompleted(sessionId: Long, exerciseId: String, weight: Double, reps: Int, completed: Boolean) = viewModelScope.launch {
+    fun setExerciseCompleted(sessionId: Long, originalExerciseId: String, weight: Double, reps: Int, completed: Boolean) = viewModelScope.launch {
         if (completed) {
             if (weight !in 0.0..5000.0 || reps !in 1..100) return@launch
-            dao.completeExercise(ExerciseCompletionEntity(sessionId, exerciseId, (weight * 1000).roundToLong(), reps, System.currentTimeMillis()))
-        } else dao.uncompleteExercise(sessionId, exerciseId)
+            dao.completePlannedExercise(sessionId, originalExerciseId, (weight * 1000).roundToLong(), reps, System.currentTimeMillis())
+        } else dao.uncompletePlannedExercise(sessionId, originalExerciseId)
+    }
+    fun swapExercise(sessionId: Long, originalExerciseId: String, swapExerciseId: String) = viewModelScope.launch {
+        dao.setSessionExerciseSwap(sessionId, originalExerciseId, swapExerciseId)
+    }
+    fun useOriginalExercise(sessionId: Long, originalExerciseId: String) = viewModelScope.launch {
+        dao.clearSessionExerciseSwap(sessionId, originalExerciseId)
     }
     fun completeWorkout(id: Long) = viewModelScope.launch {
         val now = System.currentTimeMillis()
@@ -281,7 +287,7 @@ class MainViewModel(
                 getApplication<Application>().contentResolver.openOutputStream(uri, "wt")?.bufferedWriter()?.use { it.write(json) }
                     ?: error("Could not open the selected document.")
             }
-            BackupUiState.Success("Backup exported: ${counts.total} records across all 14 data domains.")
+            BackupUiState.Success("Backup exported: ${counts.total} records across all 15 data domains.")
         } catch (e: Exception) {
             BackupUiState.Error(e.message ?: "Backup export failed.")
         }
@@ -306,7 +312,7 @@ class MainViewModel(
                 } ?: error("Could not open the selected document.")
             }
             val counts = backupRepository.importJson(json)
-            BackupUiState.Success("Backup restored and verified: ${counts.total} records across all 14 data domains.")
+            BackupUiState.Success("Backup restored and verified: ${counts.total} records across all 15 data domains.")
         } catch (e: Exception) {
             BackupUiState.Error("Import failed: ${e.message ?: "invalid backup"} Existing data was not changed.")
         }

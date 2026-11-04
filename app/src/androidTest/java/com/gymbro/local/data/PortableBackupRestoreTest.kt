@@ -36,9 +36,11 @@ class PortableBackupRestoreTest {
             "prepared-stable", "prepared-log-stable", 20_388,
         )
         val expectedPrepared = PreparedMealEntity("prepared-stable", 10, 20_388, 4, 1, false, 155)
+        val expectedSwap = SessionExerciseSwapEntity(7, "chest-press", "pec-deck")
         dao.restoreSessions(listOf(WorkoutSessionEntity(7, "push", "Push", 100, null)))
-        dao.restoreSetCompletions(listOf(SetCompletionEntity(7, "chest-press", 0)))
-        dao.restoreExerciseCompletions(listOf(ExerciseCompletionEntity(7, "chest-press", 50_000, 8, 120)))
+        dao.restoreSetCompletions(listOf(SetCompletionEntity(7, "pec-deck", 0)))
+        dao.restoreExerciseCompletions(listOf(ExerciseCompletionEntity(7, "pec-deck", 50_000, 8, 120)))
+        dao.restoreSessionExerciseSwaps(listOf(expectedSwap))
         dao.restoreFoodEntries(listOf(expectedFood))
         dao.restoreCustomFoods(listOf(CustomFoodEntity(9, "Food", 100_000, 10_000, 140)))
         dao.restoreSavedMeals(listOf(SavedMealEntity(10, "Meal", 150)))
@@ -48,15 +50,16 @@ class PortableBackupRestoreTest {
         dao.restoreSettings(listOf(SettingsEntity(1, 2100, 170, 2300)))
         val (json, exportedCounts) = repository.exportJson()
 
-        dao.clearSetCompletions(); dao.clearExerciseCompletions(); dao.clearPreparedMeals(); dao.clearSavedMealItems(); dao.clearSessions()
+        dao.clearSetCompletions(); dao.clearExerciseCompletions(); dao.clearSessionExerciseSwaps(); dao.clearPreparedMeals(); dao.clearSavedMealItems(); dao.clearSessions()
         dao.clearFoodEntries(); dao.clearCustomFoods(); dao.clearSavedMeals(); dao.clearWeightEntries(); dao.clearSettings()
         val restoredCounts = repository.importJson(json)
 
         assertEquals(exportedCounts, restoredCounts)
-        assertEquals(58, restoredCounts.total)
+        assertEquals(59, restoredCounts.total)
         assertEquals(7, dao.allSessionsOnce().single().id)
         assertNull(dao.allSessionsOnce().single().completedAt)
-        assertEquals(SetCompletionEntity(7, "chest-press", 0), dao.allSetCompletionsOnce().single())
+        assertEquals(SetCompletionEntity(7, "pec-deck", 0), dao.allSetCompletionsOnce().single())
+        assertEquals(expectedSwap, dao.allSessionExerciseSwapsOnce().single())
         assertEquals(10, dao.allSavedMealItemsOnce().single().mealId)
         assertEquals(listOf(expectedFood), dao.allFoodEntriesOnce())
         assertEquals(listOf(expectedPrepared), dao.allPreparedMealsOnce())
@@ -86,7 +89,7 @@ class PortableBackupRestoreTest {
         assertEquals(counts, restoredCounts)
     }
 
-    @Test fun loweringPrescriptionSetsDoesNotMakeExportedV3BackupUnrestorable() = runBlocking {
+    @Test fun loweringPrescriptionSetsDoesNotMakeExportedCurrentBackupUnrestorable() = runBlocking {
         val dao = database.dao()
         dao.ensureSettings(SettingsEntity())
         dao.reconcileWorkoutSeeds()
@@ -100,6 +103,6 @@ class PortableBackupRestoreTest {
         assertEquals(exportedCounts, restoredCounts)
         assertEquals(SetCompletionEntity(7, "chest-press", 2), dao.allSetCompletionsOnce().single())
         assertEquals(2, dao.prescription("push-chest-press")!!.sets)
-        assertTrue(json.contains("\"version\":3"))
+        assertTrue(json.contains("\"version\":5"))
     }
 }

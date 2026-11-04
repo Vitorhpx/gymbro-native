@@ -60,6 +60,18 @@ data class ExerciseCompletionEntity(
     val completedAt: Long,
 )
 
+@Entity(
+    tableName = "session_exercise_swaps",
+    primaryKeys = ["sessionId", "originalExerciseId"],
+    indices = [Index(value = ["swapExerciseId"])],
+)
+@Serializable
+data class SessionExerciseSwapEntity(
+    val sessionId: Long,
+    val originalExerciseId: String,
+    val swapExerciseId: String,
+)
+
 fun Iterable<ExerciseCompletionEntity>.bestPrevious(
     exerciseId: String,
     excludingSessionId: Long,
@@ -277,6 +289,7 @@ interface GymBroDao {
     @Query("SELECT * FROM workout_sessions ORDER BY id") suspend fun allSessionsOnce(): List<WorkoutSessionEntity>
     @Query("SELECT * FROM set_completions ORDER BY sessionId, exerciseId, setIndex") suspend fun allSetCompletionsOnce(): List<SetCompletionEntity>
     @Query("SELECT * FROM exercise_completions ORDER BY sessionId, exerciseId") suspend fun allExerciseCompletionsOnce(): List<ExerciseCompletionEntity>
+    @Query("SELECT * FROM session_exercise_swaps ORDER BY sessionId, originalExerciseId") suspend fun allSessionExerciseSwapsOnce(): List<SessionExerciseSwapEntity>
     @Query("SELECT * FROM food_entries ORDER BY id") suspend fun allFoodEntriesOnce(): List<FoodEntryEntity>
     @Query("SELECT * FROM custom_foods ORDER BY id") suspend fun allCustomFoodsOnce(): List<CustomFoodEntity>
     @Query("SELECT * FROM saved_meals ORDER BY id") suspend fun allSavedMealsOnce(): List<SavedMealEntity>
@@ -292,6 +305,7 @@ interface GymBroDao {
     @Insert suspend fun restoreSessions(values: List<WorkoutSessionEntity>)
     @Insert suspend fun restoreSetCompletions(values: List<SetCompletionEntity>)
     @Insert suspend fun restoreExerciseCompletions(values: List<ExerciseCompletionEntity>)
+    @Insert suspend fun restoreSessionExerciseSwaps(values: List<SessionExerciseSwapEntity>)
     @Insert suspend fun restoreFoodEntries(values: List<FoodEntryEntity>)
     @Insert suspend fun restoreCustomFoods(values: List<CustomFoodEntity>)
     @Insert suspend fun restoreSavedMeals(values: List<SavedMealEntity>)
@@ -306,6 +320,7 @@ interface GymBroDao {
 
     @Query("DELETE FROM set_completions") suspend fun clearSetCompletions()
     @Query("DELETE FROM exercise_completions") suspend fun clearExerciseCompletions()
+    @Query("DELETE FROM session_exercise_swaps") suspend fun clearSessionExerciseSwaps()
     @Query("DELETE FROM saved_meal_items") suspend fun clearSavedMealItems()
     @Query("DELETE FROM prepared_meals") suspend fun clearPreparedMeals()
     @Query("DELETE FROM workout_sessions") suspend fun clearSessions()
@@ -335,6 +350,8 @@ interface GymBroDao {
     @Query("SELECT * FROM workout_plans WHERE id=:id") suspend fun workoutPlan(id: String): WorkoutPlanEntity?
     @Query("SELECT * FROM workout_plan_days WHERE id=:id") suspend fun workoutPlanDay(id: String): WorkoutPlanDayEntity?
     @Query("SELECT * FROM exercise_prescriptions WHERE id=:id") suspend fun prescription(id: String): ExercisePrescriptionEntity?
+    @Query("SELECT * FROM exercise_prescriptions WHERE dayId=:dayId AND exerciseId=:exerciseId LIMIT 1")
+    suspend fun prescriptionForExercise(dayId: String, exerciseId: String): ExercisePrescriptionEntity?
     @Query("SELECT * FROM exercise_prescriptions WHERE dayId=:dayId ORDER BY position") suspend fun dayPrescriptions(dayId: String): List<ExercisePrescriptionEntity>
     @Transaction suspend fun reconcileWorkoutSeeds(seed: WorkoutPlanSeed = WorkoutPlanSeedData.ppl45v2) {
         seed.exercises.forEach { if (exercise(it.id)?.isSeeded != false) upsertExercise(it) }
@@ -385,6 +402,68 @@ interface GymBroDao {
 
     @Query("SELECT * FROM exercise_completions ORDER BY completedAt DESC")
     fun exerciseCompletions(): Flow<List<ExerciseCompletionEntity>>
+    @Query("SELECT * FROM session_exercise_swaps ORDER BY sessionId, originalExerciseId")
+    fun sessionExerciseSwaps(): Flow<List<SessionExerciseSwapEntity>>
+    @Query("SELECT * FROM workout_sessions WHERE id=:id")
+    suspend fun workoutSession(id: Long): WorkoutSessionEntity?
+    @Query("SELECT * FROM session_exercise_swaps WHERE sessionId=:sessionId AND originalExerciseId=:originalExerciseId")
+    suspend fun sessionExerciseSwap(sessionId: Long, originalExerciseId: String): SessionExerciseSwapEntity?
+    @Query("SELECT * FROM session_exercise_swaps WHERE sessionId=:sessionId ORDER BY originalExerciseId")
+    suspend fun sessionExerciseSwapsOnce(sessionId: Long): List<SessionExerciseSwapEntity>
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun upsertSessionExerciseSwap(value: SessionExerciseSwapEntity)
+    @Query("DELETE FROM session_exercise_swaps WHERE sessionId=:sessionId AND originalExerciseId=:originalExerciseId")
+    suspend fun deleteSessionExerciseSwap(sessionId: Long, originalExerciseId: String)
+    @Query("SELECT * FROM exercise_completions WHERE sessionId=:sessionId AND exerciseId=:exerciseId")
+    suspend fun exerciseCompletion(sessionId: Long, exerciseId: String): ExerciseCompletionEntity?
+
+    @Transaction suspend fun setSessionExerciseSwap(sessionId: Long, originalExerciseId: String, swapExerciseId: String) {
+        val session = requireNotNull(workoutSession(sessionId)) { "Workout session does not exist." }
+        require(session.completedAt == null) { "Completed workouts cannot be changed." }
+        require(prescriptionForExercise(session.dayId, originalExerciseId) != null) { "Exercise is not part of this workout." }
+        require(swapExerciseId in WorkoutPlanSeedData.ppl45v2.swapOptions[originalExerciseId].orEmpty()) { "Exercise is not an allowed swap." }
+        val prescriptions = dayPrescriptions(session.dayId)
+        val swapsByOriginal = sessionExerciseSwapsOnce(sessionId).associate { it.originalExerciseId to it.swapExerciseId }
+        require(isSwapExerciseAvailable(originalExerciseId, swapExerciseId, prescriptions.map { it.exerciseId }, swapsByOriginal)) {
+            "Exercise is already used by another workout slot."
+        }
+        val currentExerciseId = sessionExerciseSwap(sessionId, originalExerciseId)?.swapExerciseId ?: originalExerciseId
+        require(exerciseCompletion(sessionId, currentExerciseId) == null) { "Completed exercises cannot be swapped." }
+        upsertSessionExerciseSwap(SessionExerciseSwapEntity(sessionId, originalExerciseId, swapExerciseId))
+    }
+
+    @Transaction suspend fun clearSessionExerciseSwap(sessionId: Long, originalExerciseId: String) {
+        val session = requireNotNull(workoutSession(sessionId)) { "Workout session does not exist." }
+        require(session.completedAt == null) { "Completed workouts cannot be changed." }
+        require(prescriptionForExercise(session.dayId, originalExerciseId) != null) { "Exercise is not part of this workout." }
+        val current = sessionExerciseSwap(sessionId, originalExerciseId) ?: return
+        require(exerciseCompletion(sessionId, current.swapExerciseId) == null) { "Completed exercises cannot be swapped." }
+        deleteSessionExerciseSwap(sessionId, originalExerciseId)
+    }
+
+    @Transaction suspend fun completePlannedExercise(
+        sessionId: Long,
+        originalExerciseId: String,
+        weightMilliUnits: Long,
+        reps: Int,
+        completedAt: Long,
+    ) {
+        val session = requireNotNull(workoutSession(sessionId)) { "Workout session does not exist." }
+        require(session.completedAt == null) { "Completed workouts cannot be changed." }
+        require(prescriptionForExercise(session.dayId, originalExerciseId) != null) { "Exercise is not part of this workout." }
+        require(weightMilliUnits in 0..5_000_000 && reps in 1..100 && completedAt >= session.startedAt) { "Exercise result is invalid." }
+        val actualExerciseId = sessionExerciseSwap(sessionId, originalExerciseId)?.swapExerciseId ?: originalExerciseId
+        completeExercise(ExerciseCompletionEntity(sessionId, actualExerciseId, weightMilliUnits, reps, completedAt))
+    }
+
+    @Transaction suspend fun uncompletePlannedExercise(sessionId: Long, originalExerciseId: String) {
+        val session = requireNotNull(workoutSession(sessionId)) { "Workout session does not exist." }
+        require(session.completedAt == null) { "Completed workouts cannot be changed." }
+        require(prescriptionForExercise(session.dayId, originalExerciseId) != null) { "Exercise is not part of this workout." }
+        val actualExerciseId = sessionExerciseSwap(sessionId, originalExerciseId)?.swapExerciseId ?: originalExerciseId
+        uncompleteExercise(sessionId, actualExerciseId)
+    }
+
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun completeExercise(value: ExerciseCompletionEntity)
     @Query("DELETE FROM exercise_completions WHERE sessionId=:sessionId AND exerciseId=:exerciseId")
@@ -469,8 +548,8 @@ interface GymBroDao {
 }
 
 @Database(
-    entities = [WorkoutSessionEntity::class, SetCompletionEntity::class, ExerciseCompletionEntity::class, FoodEntryEntity::class, CustomFoodEntity::class, SavedMealEntity::class, SavedMealItemEntity::class, PreparedMealEntity::class, WeightEntryEntity::class, SettingsEntity::class, ExerciseEntity::class, WorkoutPlanEntity::class, WorkoutPlanDayEntity::class, ExercisePrescriptionEntity::class],
-    version = 6,
+    entities = [WorkoutSessionEntity::class, SetCompletionEntity::class, ExerciseCompletionEntity::class, SessionExerciseSwapEntity::class, FoodEntryEntity::class, CustomFoodEntity::class, SavedMealEntity::class, SavedMealItemEntity::class, PreparedMealEntity::class, WeightEntryEntity::class, SettingsEntity::class, ExerciseEntity::class, WorkoutPlanEntity::class, WorkoutPlanDayEntity::class, ExercisePrescriptionEntity::class],
+    version = 7,
     exportSchema = true,
 )
 @TypeConverters(GymBroConverters::class)
@@ -481,7 +560,7 @@ abstract class GymBroDatabase : RoomDatabase() {
         @Volatile private var instance: GymBroDatabase? = null
         fun get(context: Context): GymBroDatabase = instance ?: synchronized(this) {
             instance ?: Room.databaseBuilder(context.applicationContext, GymBroDatabase::class.java, "gymbro.db")
-                .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6)
+                .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7)
                 .build().also { instance = it }
         }
 
@@ -560,6 +639,13 @@ abstract class GymBroDatabase : RoomDatabase() {
                 db.execSQL("ALTER TABLE `settings` ADD COLUMN `weekendCalorieGoal` INTEGER NOT NULL DEFAULT 2000")
                 db.execSQL("UPDATE `settings` SET `weekendCalorieGoal` = `calorieGoal`")
                 db.execSQL("UPDATE `food_entries` SET `calorieTarget` = COALESCE((SELECT `calorieGoal` FROM `settings` WHERE `id` = 1), 2000)")
+            }
+        }
+
+        val MIGRATION_6_7 = object : Migration(6, 7) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("CREATE TABLE IF NOT EXISTS `session_exercise_swaps` (`sessionId` INTEGER NOT NULL, `originalExerciseId` TEXT NOT NULL, `swapExerciseId` TEXT NOT NULL, PRIMARY KEY(`sessionId`, `originalExerciseId`))")
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_session_exercise_swaps_swapExerciseId` ON `session_exercise_swaps` (`swapExerciseId`)")
             }
         }
     }

@@ -17,6 +17,7 @@ data class PortableBackup(
     val workoutSessions: List<WorkoutSessionEntity>,
     val setCompletions: List<SetCompletionEntity>,
     val exerciseCompletions: List<ExerciseCompletionEntity>,
+    val sessionExerciseSwaps: List<SessionExerciseSwapEntity> = emptyList(),
     val foodEntries: List<FoodEntryEntity>,
     val customFoods: List<CustomFoodEntity>,
     val savedMeals: List<SavedMealEntity>,
@@ -29,7 +30,7 @@ data class PortableBackup(
     val workoutPlanDays: List<WorkoutPlanDayEntity> = emptyList(),
     val exercisePrescriptions: List<ExercisePrescriptionEntity> = emptyList(),
 ) {
-    companion object { const val CURRENT_VERSION = 4 }
+    companion object { const val CURRENT_VERSION = 5 }
 }
 
 class BackupValidationException(message: String) : IllegalArgumentException(message)
@@ -80,6 +81,7 @@ class PortableBackupCodec {
                 settings = compatible.settings.map { it.copy(weekendCalorieGoal = it.calorieGoal) },
             )
         }
+        if (compatible.version < 5) compatible = compatible.copy(sessionExerciseSwaps = emptyList())
         validate(compatible)
         return compatible.canonical()
     }
@@ -94,6 +96,9 @@ class PortableBackupCodec {
         }
         duplicate(value.exerciseCompletions.map { it.sessionId to it.exerciseId })?.let {
             fail("Duplicate exercise completion identity: ${it.first}/${it.second}.")
+        }
+        duplicate(value.sessionExerciseSwaps.map { it.sessionId to it.originalExerciseId })?.let {
+            fail("Duplicate session exercise swap identity: ${it.first}/${it.second}.")
         }
         duplicate(value.foodEntries.map { it.id })?.let { fail("Duplicate food entry identity: $it.") }
         duplicate(value.customFoods.map { it.id })?.let { fail("Duplicate custom food identity: $it.") }
@@ -143,13 +148,33 @@ class PortableBackupCodec {
         }
             ?.let { fail("Invalid workout session ${it.id}.") }
         if (value.workoutSessions.count { it.completedAt == null } > 1) fail("Backup contains multiple active workout sessions.")
+        val swapsBySessionAndOriginal = value.sessionExerciseSwaps.associateBy { it.sessionId to it.originalExerciseId }
+        if (value.version >= 5) value.sessionExerciseSwaps.forEach { swap ->
+            val session = sessionsById[swap.sessionId]
+            val originalBelongsToSession = session != null && persistedPrescriptions[session.dayId]
+                .orEmpty().any { it.exerciseId == swap.originalExerciseId }
+            val allowed = WorkoutPlanSeedData.ppl45v2.swapOptions[swap.originalExerciseId].orEmpty()
+            if (!originalBelongsToSession || swap.swapExerciseId !in allowed || swap.swapExerciseId !in value.exercises.map { it.id }) {
+                fail("Invalid session exercise swap ${swap.sessionId}/${swap.originalExerciseId}/${swap.swapExerciseId}.")
+            }
+        }
+        if (value.version >= 5) value.workoutSessions.forEach { session ->
+            val actualExerciseIds = persistedPrescriptions[session.dayId].orEmpty().map { prescription ->
+                swapsBySessionAndOriginal[session.id to prescription.exerciseId]?.swapExerciseId ?: prescription.exerciseId
+            }
+            duplicate(actualExerciseIds)?.let { fail("Workout session ${session.id} reuses active exercise $it.") }
+        }
         value.setCompletions.forEach { completion ->
             val session = sessionsById[completion.sessionId]
                 ?: fail("Invalid set completion ${completion.sessionId}/${completion.exerciseId}/${completion.setIndex}.")
             val maximumSetIndexExclusive = if (value.version == 1) {
                 legacyDaysById[session.dayId]?.exercises?.firstOrNull { it.id == completion.exerciseId }?.sets
             } else {
-                persistedPrescriptions[session.dayId]?.firstOrNull { it.exerciseId == completion.exerciseId }
+                persistedPrescriptions[session.dayId]?.firstOrNull { prescription ->
+                    val actualId = swapsBySessionAndOriginal[session.id to prescription.exerciseId]?.swapExerciseId
+                        ?: prescription.exerciseId
+                    actualId == completion.exerciseId
+                }
                     ?.let { 20 }
             }
                 ?: fail("Set completion references an exercise outside session ${session.id}: ${completion.exerciseId}.")
@@ -163,7 +188,11 @@ class PortableBackupCodec {
             val belongsToSession = if (value.version == 1) {
                 legacyDaysById[session.dayId]?.exercises?.any { it.id == completion.exerciseId } == true
             } else {
-                persistedPrescriptions[session.dayId]?.any { it.exerciseId == completion.exerciseId } == true
+                persistedPrescriptions[session.dayId]?.any { prescription ->
+                    val actualId = swapsBySessionAndOriginal[session.id to prescription.exerciseId]?.swapExerciseId
+                        ?: prescription.exerciseId
+                    actualId == completion.exerciseId
+                } == true
             }
             if (!belongsToSession) {
                 fail("Exercise completion references an exercise outside session ${session.id}: ${completion.exerciseId}.")
@@ -285,6 +314,7 @@ class PortableBackupCodec {
         workoutSessions = workoutSessions.sortedBy { it.id },
         setCompletions = setCompletions.sortedWith(compareBy({ it.sessionId }, { it.exerciseId }, { it.setIndex })),
         exerciseCompletions = exerciseCompletions.sortedWith(compareBy({ it.sessionId }, { it.exerciseId })),
+        sessionExerciseSwaps = sessionExerciseSwaps.sortedWith(compareBy({ it.sessionId }, { it.originalExerciseId })),
         foodEntries = foodEntries.sortedBy { it.id },
         customFoods = customFoods.sortedBy { it.id },
         savedMeals = savedMeals.sortedBy { it.id },
