@@ -134,6 +134,7 @@ import com.gymbro.local.ui.EatSection
 import com.gymbro.local.ui.NavigationMode
 import com.gymbro.local.ui.TrainSection
 import com.gymbro.local.ui.TrainSurface
+import com.gymbro.local.ui.WorkoutElapsedTimer
 import com.gymbro.local.ui.activeExerciseId
 import com.gymbro.local.ui.completedWorkoutHistory
 import com.gymbro.local.ui.trainSurface
@@ -218,8 +219,17 @@ private enum class Tab(val label: String, val icon: ImageVector) {
     val todayCalories = if (today.dayOfWeek in setOf(DayOfWeek.SATURDAY, DayOfWeek.SUNDAY)) weekendCalories else weekdayCalories
     val createBackup = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/json")) { uri -> uri?.let(vm::exportBackup) }
     val openBackup = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri -> uri?.let(vm::importBackup) }
-    val requestNotifications = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+    val requestWorkoutNotifications = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+        if (granted) vm.refreshWorkoutNotification()
+    }
+    val requestHabitNotifications = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
         if (granted) vm.setHabitRemindersEnabled(true)
+    }
+    val startWorkout: (String, String) -> Unit = { dayId, dayName ->
+        vm.startWorkout(dayId, dayName)
+        if (android.os.Build.VERSION.SDK_INT >= 33 && !notificationPermissionGranted) {
+            requestWorkoutNotifications.launch(Manifest.permission.POST_NOTIFICATIONS)
+        }
     }
     val adaptiveInfo = currentWindowAdaptiveInfo()
 
@@ -264,8 +274,8 @@ private enum class Tab(val label: String, val icon: ImageVector) {
                                 .align(Alignment.Center),
                         ) {
                     when (tab) {
-                        Tab.Today -> TodayScreen(today, active, sessions, foods, weights, planExercises, todayCalories, settings?.proteinGoal ?: 160, vm, { tab = it }, { showSettings = true })
-                        Tab.Train -> TrainScreen(active, sessions, exerciseCompletions, sessionExerciseSwaps, exercises, planExercises, vm, { showSettings = true })
+                        Tab.Today -> TodayScreen(today, active, sessions, foods, weights, planExercises, todayCalories, settings?.proteinGoal ?: 160, vm, { tab = it }, startWorkout, { showSettings = true })
+                        Tab.Train -> TrainScreen(active, sessions, exerciseCompletions, sessionExerciseSwaps, exercises, planExercises, vm, startWorkout, { showSettings = true })
                         Tab.Eat -> EatScreen(today, foods, customFoods, savedMeals, preparedMeals, todayCalories, settings?.proteinGoal ?: 160, search, barcode, vm, scanBarcode, { showSettings = true })
                         Tab.Progress -> ProgressScreen(today, sessions, foods, weights, preparedMeals, weekdayCalories, weekendCalories, vm, { showSettings = true })
                     }
@@ -286,7 +296,7 @@ private enum class Tab(val label: String, val icon: ImageVector) {
             if (!enabled) vm.setHabitRemindersEnabled(false)
             else if (android.os.Build.VERSION.SDK_INT < 33 || ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED) {
                 vm.setHabitRemindersEnabled(true)
-            } else requestNotifications.launch(Manifest.permission.POST_NOTIFICATIONS)
+            } else requestHabitNotifications.launch(Manifest.permission.POST_NOTIFICATIONS)
         },
         exportBackup = { createBackup.launch("gymbro-backup.json") },
         importBackup = { openBackup.launch(arrayOf("application/json", "text/json", "text/plain")) },
@@ -348,7 +358,7 @@ private fun displayDate(epoch: Long): String = Instant.ofEpochMilli(epoch).atZon
     return date
 }
 
-@Composable private fun TodayScreen(today: LocalDate, active: WorkoutSessionEntity?, sessions: List<WorkoutSessionEntity>, foods: List<FoodEntryEntity>, weights: List<WeightEntryEntity>, planRows: List<PlanExerciseRow>, calorieGoal: Int, proteinGoal: Int, vm: MainViewModel, navigate: (Tab) -> Unit, settings: () -> Unit) = Page("Today", "Your daily brief", settings) {
+@Composable private fun TodayScreen(today: LocalDate, active: WorkoutSessionEntity?, sessions: List<WorkoutSessionEntity>, foods: List<FoodEntryEntity>, weights: List<WeightEntryEntity>, planRows: List<PlanExerciseRow>, calorieGoal: Int, proteinGoal: Int, vm: MainViewModel, navigate: (Tab) -> Unit, startWorkout: (String, String) -> Unit, settings: () -> Unit) = Page("Today", "Your daily brief", settings) {
     val todayFoods = foods.loggedOn(today); val calories = todayFoods.totalCalories(); val protein = todayFoods.totalProteinGrams()
     val caloriesQualified = todayFoods.qualifiesCalorieTarget(calorieGoal)
     val weekSessions = sessions.filter { it.completedAt != null && it.completedAt >= startOfWeek(today) }
@@ -361,7 +371,8 @@ private fun displayDate(epoch: Long): String = Instant.ofEpochMilli(epoch).atZon
     Panel(if (active == null) "Next session" else "Workout in progress") {
         val dayName = active?.dayName ?: recommended?.dayName ?: "Workout"
         Row(verticalAlignment = Alignment.CenterVertically) { Icon(Icons.Default.FitnessCenter, null, tint = MaterialTheme.colorScheme.primary); Spacer(Modifier.width(12.dp)); Column { Text(dayName, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold); Text("GymBro PPL 45 V2 · about 45 min", color = MaterialTheme.colorScheme.onSurfaceVariant) } }
-        Button(onClick = { if (active == null) recommended?.let { vm.startWorkout(it.dayId, it.dayName) } else navigate(Tab.Train) }, Modifier.fillMaxWidth(), enabled = active != null || recommended != null) { Icon(Icons.Default.PlayArrow, null); Spacer(Modifier.width(8.dp)); Text(if (active == null) "Start $dayName" else "Resume on Train") }
+        active?.let { WorkoutElapsedTimer(it.startedAt) }
+        Button(onClick = { if (active == null) recommended?.let { startWorkout(it.dayId, it.dayName) } else navigate(Tab.Train) }, Modifier.fillMaxWidth(), enabled = active != null || recommended != null) { Icon(Icons.Default.PlayArrow, null); Spacer(Modifier.width(8.dp)); Text(if (active == null) "Start $dayName" else "Resume on Train") }
     }
     Panel("This week") {
         Text("${weekSessions.size} of 3 workouts completed", fontWeight = FontWeight.SemiBold); LinearProgressIndicator({ (weekSessions.size / 3f).coerceIn(0f, 1f) }, Modifier.fillMaxWidth())
@@ -373,7 +384,7 @@ private fun displayDate(epoch: Long): String = Instant.ofEpochMilli(epoch).atZon
     }
 }
 
-@Composable private fun TrainScreen(active: WorkoutSessionEntity?, sessions: List<WorkoutSessionEntity>, completions: List<ExerciseCompletionEntity>, swaps: List<SessionExerciseSwapEntity>, exercises: List<ExerciseEntity>, planRows: List<PlanExerciseRow>, vm: MainViewModel, settings: () -> Unit) = Page(if (active == null) "Train" else active.dayName, if (active == null) "PPL · 3 days · 45 min" else "Session active · saved locally", settings) {
+@Composable private fun TrainScreen(active: WorkoutSessionEntity?, sessions: List<WorkoutSessionEntity>, completions: List<ExerciseCompletionEntity>, swaps: List<SessionExerciseSwapEntity>, exercises: List<ExerciseEntity>, planRows: List<PlanExerciseRow>, vm: MainViewModel, startWorkout: (String, String) -> Unit, settings: () -> Unit) = Page(if (active == null) "Train" else active.dayName, if (active == null) "PPL · 3 days · 45 min" else "Session active · saved locally", settings) {
     var section by rememberSaveable { mutableStateOf(TrainSection.PLANS) }
     var browseSections by rememberSaveable(active?.id) { mutableStateOf(false) }
     var editing by remember { mutableStateOf<PlanExerciseRow?>(null) }
@@ -403,7 +414,7 @@ private fun displayDate(epoch: Long): String = Instant.ofEpochMilli(epoch).atZon
                             OutlinedButton({ editing = row }) { Text("Edit") }
                         }
                     }
-                    Button({ vm.startWorkout(day.dayId, day.dayName) }, Modifier.fillMaxWidth(), enabled = active == null) { Text(if (active == null) "Start ${day.dayName}" else "Finish the active workout first") }
+                    Button({ startWorkout(day.dayId, day.dayName) }, Modifier.fillMaxWidth(), enabled = active == null) { Text(if (active == null) "Start ${day.dayName}" else "Finish the active workout first") }
                 }
             }
             }
@@ -415,7 +426,10 @@ private fun displayDate(epoch: Long): String = Instant.ofEpochMilli(epoch).atZon
         OutlinedButton({ browseSections = true }, Modifier.fillMaxWidth()) { Text("Browse plans, history & library") }
         val dayRows = planRows.filter { it.dayId == activeSession.dayId }.sortedBy { it.exercisePosition }
         val exercisesById = exercises.associateBy { it.id }
-        Text("Started ${displayDate(activeSession.startedAt)}", color = MaterialTheme.colorScheme.onSurfaceVariant)
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+            Text("Started ${displayDate(activeSession.startedAt)}", color = MaterialTheme.colorScheme.onSurfaceVariant)
+            WorkoutElapsedTimer(activeSession.startedAt)
+        }
         dayRows.forEach { exercise ->
             val actualExerciseId = activeExerciseId(activeSession.id, exercise.exerciseId, swaps)
             val actualExercise = exercisesById[actualExerciseId]

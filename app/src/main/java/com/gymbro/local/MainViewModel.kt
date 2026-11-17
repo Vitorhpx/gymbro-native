@@ -33,6 +33,7 @@ import com.gymbro.local.update.AppRelease
 import com.gymbro.local.update.AppUpdateService
 import com.gymbro.local.update.GitHubAppUpdateService
 import com.gymbro.local.update.SemVer
+import com.gymbro.local.workout.WorkoutNotificationManager
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
@@ -109,6 +110,7 @@ class MainViewModel(
     private val database = GymBroDatabase.get(application)
     private val dao = database.dao()
     private val backupRepository = PortableBackupRepository(database)
+    private val workoutNotification = WorkoutNotificationManager(application)
     private val preferences = application.getSharedPreferences(ReminderScheduler.PREFERENCES, Context.MODE_PRIVATE)
     val active = dao.activeSession().stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), null)
     val sessions = dao.sessions().stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
@@ -142,12 +144,23 @@ class MainViewModel(
     val remindersEnabled = _remindersEnabled.asStateFlow()
 
     init {
-        viewModelScope.launch { dao.ensureSettings(SettingsEntity()); dao.reconcileWorkoutSeeds() }
+        viewModelScope.launch {
+            dao.ensureSettings(SettingsEntity())
+            dao.reconcileWorkoutSeeds()
+            dao.activeSessionOnce()?.let { workoutNotification.show(it.startedAt) }
+                ?: workoutNotification.cancel()
+        }
         if (_remindersEnabled.value) ReminderScheduler.ensureScheduled(application)
     }
 
     fun startWorkout(dayId: String, dayName: String) = viewModelScope.launch {
-        dao.startSessionIfNone(WorkoutSessionEntity(dayId = dayId, dayName = dayName, startedAt = System.currentTimeMillis()))
+        val session = WorkoutSessionEntity(dayId = dayId, dayName = dayName, startedAt = System.currentTimeMillis())
+        val insertedId = dao.startSessionIfNone(session)
+        val activeSession = if (insertedId != null) session else dao.activeSessionOnce()
+        activeSession?.let { workoutNotification.show(it.startedAt) }
+    }
+    fun refreshWorkoutNotification() = viewModelScope.launch {
+        dao.activeSessionOnce()?.let { workoutNotification.show(it.startedAt) }
     }
     fun setExerciseCompleted(sessionId: Long, originalExerciseId: String, weight: Double, reps: Int, completed: Boolean) = viewModelScope.launch {
         if (completed) {
@@ -164,6 +177,7 @@ class MainViewModel(
     fun completeWorkout(id: Long) = viewModelScope.launch {
         val now = System.currentTimeMillis()
         dao.completeSession(id, now, now.localEpochDay())
+        workoutNotification.cancel()
     }
     fun createExercise(name: String, muscleGroup: String, category: String) = viewModelScope.launch {
         val clean = name.trim()

@@ -50,6 +50,7 @@ class GymBroNavigationTest {
         compose.onNodeWithContentDescription("Train").performClick()
         compose.onNodeWithText("Start Push").performScrollTo().performClick()
         compose.waitUntil(5_000) { compose.onAllNodesWithText("Swap exercise").fetchSemanticsNodes().isNotEmpty() }
+        compose.onNodeWithContentDescription("Workout time", substring = true).assertIsDisplayed()
 
         compose.onAllNodesWithText("Swap exercise")[0].performScrollTo().performClick()
         compose.onNodeWithText("Swap Chest Press Machine").assertIsDisplayed()
